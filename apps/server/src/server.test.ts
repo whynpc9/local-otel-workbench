@@ -557,7 +557,16 @@ describe("OTLP HTTP receiver", () => {
         { key: "ai.usage.cacheCreationInputTokens", value: { intValue: 2 } },
         { key: "ai.response.finishReason", value: { stringValue: "tool-calls" } },
         { key: "ai.response.providerMetadata", value: { stringValue: "{\"deepseek\":{\"promptCacheHitTokens\":8,\"promptCacheMissTokens\":4}}" } },
-        { key: "ai.prompt.tools", value: { stringValue: JSON.stringify([{ name: "lookup_weather", description: "Lookup weather", inputSchema: { type: "object", properties: { city: { type: "string" } } } }]) } },
+        {
+          key: "ai.prompt.tools",
+          value: {
+            arrayValue: {
+              values: [
+                { stringValue: JSON.stringify({ name: "lookup_weather", description: "Lookup weather", inputSchema: { type: "object", properties: { city: { type: "string" } } } }) }
+              ]
+            }
+          }
+        },
         { key: "ai.prompt.messages", value: { stringValue: JSON.stringify(promptMessages) } },
         { key: "ai.response.text", value: { stringValue: "AI SDK DeepSeek telemetry succeeded." } },
         { key: "ai.toolCall.name", value: { stringValue: "lookup_weather" } },

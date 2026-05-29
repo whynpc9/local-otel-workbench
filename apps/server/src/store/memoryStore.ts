@@ -789,7 +789,7 @@ function extractOfferedTools(attrs: Record<string, unknown>) {
 }
 
 function normalizeOfferedTool(value: unknown) {
-  const record = isRecord(value) ? value : {};
+  const record = parseMaybeJsonObject(value) ?? {};
   const fn = isRecord(record.function) ? record.function as Record<string, unknown> : record;
   const name = readString(fn, "name")
     ?? readString(record, "name")
