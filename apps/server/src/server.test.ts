@@ -551,6 +551,13 @@ describe("OTLP HTTP receiver", () => {
         { key: "ai.operationId", value: { stringValue: "ai.generateText" } },
         { key: "ai.usage.promptTokens", value: { intValue: 12 } },
         { key: "ai.usage.completionTokens", value: { intValue: 7 } },
+        { key: "ai.usage.totalTokens", value: { intValue: 22 } },
+        { key: "ai.usage.reasoningTokens", value: { intValue: 3 } },
+        { key: "ai.usage.cachedInputTokens", value: { intValue: 8 } },
+        { key: "ai.usage.cacheCreationInputTokens", value: { intValue: 2 } },
+        { key: "ai.response.finishReason", value: { stringValue: "tool-calls" } },
+        { key: "ai.response.providerMetadata", value: { stringValue: "{\"deepseek\":{\"promptCacheHitTokens\":8,\"promptCacheMissTokens\":4}}" } },
+        { key: "ai.prompt.tools", value: { stringValue: JSON.stringify([{ name: "lookup_weather", description: "Lookup weather", inputSchema: { type: "object", properties: { city: { type: "string" } } } }]) } },
         { key: "ai.prompt.messages", value: { stringValue: JSON.stringify(promptMessages) } },
         { key: "ai.response.text", value: { stringValue: "AI SDK DeepSeek telemetry succeeded." } },
         { key: "ai.toolCall.name", value: { stringValue: "lookup_weather" } },
@@ -559,7 +566,7 @@ describe("OTLP HTTP receiver", () => {
       ]
     }));
 
-    const detail = await fetchJson<{ trace: { genAi: { spans: Array<{ provider?: string; model?: string; inputTokens?: number; outputTokens?: number }>; conversation: Array<{ role: string; kind: string; name?: string; contentPreview: string }> } } }>(
+    const detail = await fetchJson<{ trace: { genAi: { spans: Array<{ provider?: string; model?: string; inputTokens?: number; outputTokens?: number; totalTokens?: number; reasoningTokens?: number; cacheReadInputTokens?: number; cacheCreationInputTokens?: number; finishReason?: string; providerMetadataPreview?: string }>; timeline: Array<{ finishReason?: string; cacheReadInputTokens?: number; reasoningTokens?: number }>; requests: Array<{ primarySpanId: string; label: string; model?: string; operation?: string; finishReason?: string; cacheReadInputTokens?: number; messages: Array<{ role: string; kind: string; name?: string; contentPreview: string }>; offeredTools: Array<{ name: string; description?: string; schemaPreview?: string }> }>; conversation: Array<{ role: string; kind: string; name?: string; contentPreview: string }>; totalTokens?: number; reasoningTokens?: number; cacheReadInputTokens?: number; cacheCreationInputTokens?: number; finishReasons: string[]; providerMetadataCount: number } } }>(
       `${addressUrl(running.dashboard)}/api/traces/11111111111111111111111111111111`
     );
 
@@ -567,8 +574,47 @@ describe("OTLP HTTP receiver", () => {
       provider: "deepseek",
       model: "deepseek-chat",
       inputTokens: 12,
-      outputTokens: 7
+      outputTokens: 7,
+      totalTokens: 22,
+      reasoningTokens: 3,
+      cacheReadInputTokens: 8,
+      cacheCreationInputTokens: 2,
+      finishReason: "tool-calls"
     });
+    expect(detail.trace.genAi.spans[0]?.providerMetadataPreview).toContain("promptCacheHitTokens");
+    expect(detail.trace.genAi.timeline[0]).toMatchObject({
+      finishReason: "tool-calls",
+      cacheReadInputTokens: 8,
+      reasoningTokens: 3
+    });
+    expect(detail.trace.genAi).toMatchObject({
+      totalTokens: 22,
+      reasoningTokens: 3,
+      cacheReadInputTokens: 8,
+      cacheCreationInputTokens: 2,
+      finishReasons: ["tool-calls"],
+      providerMetadataCount: 1
+    });
+    expect(detail.trace.genAi.requests).toHaveLength(1);
+    expect(detail.trace.genAi.requests[0]).toMatchObject({
+      primarySpanId: "2222222222222222",
+      label: "deepseek-chat",
+      model: "deepseek-chat",
+      operation: "ai.generateText",
+      finishReason: "tool-calls",
+      cacheReadInputTokens: 8
+    });
+    expect(detail.trace.genAi.requests[0]?.messages.map((turn) => `${turn.role}:${turn.contentPreview}`)).toEqual([
+      "user:Ping DeepSeek through AI SDK.",
+      "assistant:AI SDK DeepSeek telemetry succeeded.",
+      "tool:{\"city\":\"Shanghai\"}",
+      "tool:{\"forecast\":\"clear\"}"
+    ]);
+    expect(detail.trace.genAi.requests[0]?.offeredTools[0]).toMatchObject({
+      name: "lookup_weather",
+      description: "Lookup weather"
+    });
+    expect(detail.trace.genAi.requests[0]?.offeredTools[0]?.schemaPreview).toContain("city");
     expect(detail.trace.genAi.conversation.map((turn) => `${turn.role}:${turn.contentPreview}`)).toEqual([
       "user:Ping DeepSeek through AI SDK.",
       "assistant:AI SDK DeepSeek telemetry succeeded.",

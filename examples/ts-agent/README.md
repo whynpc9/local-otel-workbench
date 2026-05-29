@@ -34,6 +34,7 @@ The complex probe creates service `ts-ai-sdk-deepseek-complex` and runs two Deep
 
 - Trace waterfall: parent `agent.session.deepseek_complex_e2e`, child `agent.step.triage` / `agent.step.validation`, AI SDK model spans, tool spans, and retrieval spans.
 - GenAI view: DeepSeek provider/model metadata, token usage, prompts/responses, and tool call/result turns.
+- Requests view: multiple AI SDK model requests plus a deterministic `llm.request.requests_view_fixture` span that carries request messages, offered tool schemas, finish reason, cache tokens, reasoning tokens, and provider metadata.
 - Agent/RAG view: `searchIncidents`, `getServiceMetrics`, `inspectTraceSample`, `createRemediationPlan`, retrieved documents, and a two-round agent timeline.
 
 Optional environment variables:

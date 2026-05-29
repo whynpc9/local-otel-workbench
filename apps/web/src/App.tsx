@@ -2087,7 +2087,7 @@ function GenAiPage({ traces, selectedTraceId, onSelect, trace, loading, onOpenIn
   );
 }
 
-type GenAiTab = "steps" | "messages" | "rag" | "tools";
+type GenAiTab = "steps" | "messages" | "requests" | "rag" | "tools";
 
 function GenAiDetail({ trace, onOpenInTraces, onOpenLogs }: {
   trace: TraceDetail;
@@ -2096,6 +2096,7 @@ function GenAiDetail({ trace, onOpenInTraces, onOpenLogs }: {
 }) {
   const primary = useMemo(() => derivePrimaryModel(trace), [trace]);
   const conversation = trace.genAi.conversation;
+  const requestCount = trace.genAi.requests.length;
   const toolStats = useMemo(() => aggregateToolStats(trace), [trace]);
   const rag = trace.genAi.rag;
   const stepCount = trace.genAi.timeline.length || trace.genAi.spans.length;
@@ -2134,8 +2135,23 @@ function GenAiDetail({ trace, onOpenInTraces, onOpenLogs }: {
           <div className="genai-mini-stats" aria-label="Trace statistics">
             <GenAiMiniStat
               label="Tokens"
-              value={(trace.genAi.totalTokens ?? 0).toLocaleString()}
+              value={formatOptionalCount(trace.genAi.totalTokens)}
               title={`${(trace.genAi.inputTokens ?? 0).toLocaleString()} in · ${(trace.genAi.outputTokens ?? 0).toLocaleString()} out`}
+            />
+            <GenAiMiniStat
+              label="Cache"
+              value={formatOptionalCount(trace.genAi.cacheReadInputTokens)}
+              title={trace.genAi.cacheReadInputTokens === undefined ? "No cache read token data captured" : "Cache read input tokens"}
+            />
+            <GenAiMiniStat
+              label="Reasoning"
+              value={formatOptionalCount(trace.genAi.reasoningTokens)}
+              title={trace.genAi.reasoningTokens === undefined ? "No reasoning token data captured" : "Reasoning tokens"}
+            />
+            <GenAiMiniStat
+              label="Finish"
+              value={formatFinishReasonValue(trace.genAi.finishReasons)}
+              title={trace.genAi.finishReasons.length ? trace.genAi.finishReasons.join(", ") : "No finish reason captured"}
             />
             <GenAiMiniStat
               label="Cost"
@@ -2152,6 +2168,11 @@ function GenAiDetail({ trace, onOpenInTraces, onOpenLogs }: {
               label="Retrieval"
               value={rag.retrievedDocCount.toLocaleString()}
               title={`${rag.retrievalSpanCount} retr · ${rag.embeddingSpanCount} embed${rag.rerankSpanCount ? ` · ${rag.rerankSpanCount} rerank` : ""}`}
+            />
+            <GenAiMiniStat
+              label="Metadata"
+              value={formatOptionalCount(trace.genAi.providerMetadataCount)}
+              title={trace.genAi.providerMetadataCount ? "Provider metadata captured on GenAI spans" : "No provider metadata captured"}
             />
           </div>
         </div>
@@ -2170,6 +2191,7 @@ function GenAiDetail({ trace, onOpenInTraces, onOpenLogs }: {
       <div className="tab-strip genai-tab-strip">
         <TabButton active={tab === "messages"} onClick={() => setTab("messages")} label="Messages" count={conversation.length} />
         <TabButton active={tab === "steps"} onClick={() => setTab("steps")} label="Steps" count={stepCount} />
+        <TabButton active={tab === "requests"} onClick={() => setTab("requests")} label="Requests" count={requestCount} />
         <TabButton active={tab === "rag"} onClick={() => setTab("rag")} label="RAG" count={rag.documents.length || rag.retrievedDocCount} />
         <TabButton active={tab === "tools"} onClick={() => setTab("tools")} label="Tools" count={toolStats.length} />
       </div>
@@ -2183,6 +2205,8 @@ function GenAiDetail({ trace, onOpenInTraces, onOpenLogs }: {
           )
         ) : tab === "steps" ? (
           <GenAiSteps trace={trace} />
+        ) : tab === "requests" ? (
+          <GenAiRequestsPanel trace={trace} />
         ) : tab === "rag" ? (
           <RagPanel rag={rag} />
         ) : (
@@ -2206,6 +2230,17 @@ function GenAiMiniStat({ label, value, title, tone }: {
       <strong className="genai-mini-stat-value">{value}</strong>
     </span>
   );
+}
+
+function formatOptionalCount(value: number | undefined): string {
+  return value === undefined ? "—" : value.toLocaleString();
+}
+
+function formatFinishReasonValue(values: string[]): string {
+  if (values.length === 0) {
+    return "—";
+  }
+  return values.length === 1 ? values[0]! : `${values.length} types`;
 }
 
 function KpiCell({ label, primary, secondary, tone }: {
@@ -2253,6 +2288,12 @@ interface StepRow {
   status: "ok" | "error";
   inputTokens?: number | undefined;
   outputTokens?: number | undefined;
+  totalTokens?: number | undefined;
+  reasoningTokens?: number | undefined;
+  cacheReadInputTokens?: number | undefined;
+  cacheCreationInputTokens?: number | undefined;
+  finishReason?: string | undefined;
+  providerMetadataPreview?: string | undefined;
   provider?: string | undefined;
   model?: string | undefined;
   toolName?: string | undefined;
@@ -2271,6 +2312,12 @@ function buildGenAiSteps(trace: TraceDetail): StepRow[] {
         status: t.status,
         inputTokens: t.inputTokens,
         outputTokens: t.outputTokens,
+        totalTokens: t.totalTokens,
+        reasoningTokens: t.reasoningTokens,
+        cacheReadInputTokens: t.cacheReadInputTokens,
+        cacheCreationInputTokens: t.cacheCreationInputTokens,
+        finishReason: t.finishReason,
+        providerMetadataPreview: t.providerMetadataPreview,
         provider: t.provider,
         model: t.model,
         toolName: t.toolName
@@ -2287,6 +2334,12 @@ function buildGenAiSteps(trace: TraceDetail): StepRow[] {
     status: s.error ? "error" : "ok",
     inputTokens: s.inputTokens,
     outputTokens: s.outputTokens,
+    totalTokens: s.totalTokens,
+    reasoningTokens: s.reasoningTokens,
+    cacheReadInputTokens: s.cacheReadInputTokens,
+    cacheCreationInputTokens: s.cacheCreationInputTokens,
+    finishReason: s.finishReason,
+    providerMetadataPreview: s.providerMetadataPreview,
     provider: s.provider,
     model: s.model,
     toolName: s.toolName
@@ -2328,6 +2381,11 @@ function GenAiSteps({ trace }: { trace: TraceDetail }) {
                 {(step.inputTokens || step.outputTokens) ? (
                   <span>{(step.inputTokens ?? 0).toLocaleString()} in / {(step.outputTokens ?? 0).toLocaleString()} out</span>
                 ) : null}
+                {step.reasoningTokens ? <span>{step.reasoningTokens.toLocaleString()} reasoning</span> : null}
+                {step.cacheReadInputTokens ? <span>{step.cacheReadInputTokens.toLocaleString()} cache read</span> : null}
+                {step.cacheCreationInputTokens ? <span>{step.cacheCreationInputTokens.toLocaleString()} cache create</span> : null}
+                {step.finishReason ? <span>finish {step.finishReason}</span> : null}
+                {step.providerMetadataPreview ? <span title={step.providerMetadataPreview}>provider metadata</span> : null}
                 {step.model && step.model !== step.label ? <span>{step.model}</span> : null}
                 {step.provider ? <span className="muted">{step.provider}</span> : null}
               </div>
@@ -2348,6 +2406,175 @@ function stepKindMeta(kind: string): { icon: typeof Bot; tone: string } {
   if (k.includes("agent")) return { icon: Sparkles, tone: "agent" };
   if (k.includes("chat") || k.includes("completion") || k.includes("llm") || k.includes("text_generation")) return { icon: Bot, tone: "llm" };
   return { icon: MessageSquareCode, tone: "default" };
+}
+
+type GenAiRequest = TraceDetail["genAi"]["requests"][number];
+type GenAiRequestTab = "overview" | "flow" | "messages" | "tools" | "response" | "wire";
+
+function GenAiRequestsPanel({ trace }: { trace: TraceDetail }) {
+  const requests = trace.genAi.requests;
+  const [selectedId, setSelectedId] = useState(requests[0]?.id ?? "");
+  const [tab, setTab] = useState<GenAiRequestTab>("overview");
+  const selected = requests.find((request) => request.id === selectedId) ?? requests[0];
+  const primarySpan = selected ? trace.spans.find((span) => span.spanId === selected.primarySpanId) : undefined;
+
+  if (!selected) {
+    return <InlineEmpty icon={Bot} message="No model requests were reconstructed for this trace." />;
+  }
+
+  return (
+    <div className="request-inspector">
+      <div className="request-list" aria-label="LLM requests">
+        {requests.map((request, index) => (
+          <button
+            key={request.id}
+            type="button"
+            className={request.id === selected.id ? "request-list-row active" : "request-list-row"}
+            onClick={() => setSelectedId(request.id)}
+          >
+            <span className="request-list-head">
+              <strong>#{index + 1} {request.label}</strong>
+              {request.status === "error" ? <AlertTriangle size={11} className="span-error-icon" /> : null}
+            </span>
+            <span className="request-list-meta">
+              <span>{formatDuration(request.durationNano)}</span>
+              <span>{formatOptionalCount(request.totalTokens ?? sumTokenPair(request.inputTokens, request.outputTokens))} tok</span>
+              {request.finishReason ? <span>{request.finishReason}</span> : null}
+            </span>
+          </button>
+        ))}
+      </div>
+      <div className="request-detail">
+        <header className="request-detail-header">
+          <div>
+            <strong>{selected.label}</strong>
+            <div className="request-detail-sub">
+              {selected.model ? <code className="genai-model-badge">{selected.model}</code> : null}
+              {selected.provider ? <span>{selected.provider}</span> : null}
+              <CopyableCode value={selected.primarySpanId} display={shortId(selected.primarySpanId)} copyLabel="Copy primary span ID" />
+            </div>
+          </div>
+          <span className={selected.status === "error" ? "request-status error" : "request-status"}>{selected.status}</span>
+        </header>
+        <div className="tab-strip request-tab-strip">
+          <TabButton active={tab === "overview"} onClick={() => setTab("overview")} label="Overview" count={selected.relatedSpanIds.length} />
+          <TabButton active={tab === "flow"} onClick={() => setTab("flow")} label="Flow" count={selected.messages.length} />
+          <TabButton active={tab === "messages"} onClick={() => setTab("messages")} label="Messages" count={selected.messages.length} />
+          <TabButton active={tab === "tools"} onClick={() => setTab("tools")} label="Tools" count={selected.offeredTools.length} />
+          <TabButton active={tab === "response"} onClick={() => setTab("response")} label="Response" count={selected.finishReason ? 1 : 0} />
+          <TabButton active={tab === "wire"} onClick={() => setTab("wire")} label="Wire" count={primarySpan ? Object.keys(primarySpan.attributes).length : 0} />
+        </div>
+        <div className="request-tab-content">
+          {tab === "overview" ? (
+            <RequestOverview request={selected} />
+          ) : tab === "flow" ? (
+            <RequestFlow request={selected} />
+          ) : tab === "messages" ? (
+            selected.messages.length === 0 ? <InlineEmpty icon={MessageSquareCode} message="No request message payload was captured." /> : <MessagesView turns={selected.messages} />
+          ) : tab === "tools" ? (
+            <RequestTools tools={selected.offeredTools} />
+          ) : tab === "response" ? (
+            <RequestResponse request={selected} />
+          ) : (
+            <RequestWire request={selected} primarySpan={primarySpan} />
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function sumTokenPair(input: number | undefined, output: number | undefined): number | undefined {
+  return input === undefined && output === undefined ? undefined : (input ?? 0) + (output ?? 0);
+}
+
+function RequestOverview({ request }: { request: GenAiRequest }) {
+  return (
+    <div className="request-overview">
+      <KpiCell label="Duration" primary={formatDuration(request.durationNano)} />
+      <KpiCell label="Tokens" primary={formatOptionalCount(request.totalTokens ?? sumTokenPair(request.inputTokens, request.outputTokens))} secondary={`${request.inputTokens ?? 0} in · ${request.outputTokens ?? 0} out`} />
+      <KpiCell label="Cache read" primary={formatOptionalCount(request.cacheReadInputTokens)} />
+      <KpiCell label="Reasoning" primary={formatOptionalCount(request.reasoningTokens)} />
+      <KpiCell label="Finish" primary={request.finishReason ?? "—"} />
+      <KpiCell label="Tools offered" primary={request.offeredTools.length.toLocaleString()} />
+    </div>
+  );
+}
+
+function RequestFlow({ request }: { request: GenAiRequest }) {
+  if (request.messages.length === 0) {
+    return <InlineEmpty icon={GitBranch} message="No request flow content was captured." />;
+  }
+  return (
+    <div className="request-flow">
+      {request.messages.map((turn, index) => {
+        const meta = messageRoleMeta(turn);
+        return (
+          <div className={`request-flow-row tone-${meta.tone}`} key={`${turn.spanId}-${turn.kind}-${index}`}>
+            <span className="request-flow-index">{index + 1}</span>
+            <span className="request-flow-icon"><meta.icon size={13} /></span>
+            <div className="request-flow-body">
+              <div className="request-flow-title">
+                <strong>{meta.label}</strong>
+                {turn.name ? <code>{turn.name}</code> : null}
+              </div>
+              <p>{turn.contentPreview || turn.reasoningPreview || "No content captured."}</p>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function RequestTools({ tools }: { tools: GenAiRequest["offeredTools"] }) {
+  if (tools.length === 0) {
+    return <InlineEmpty icon={Wrench} message="No offered tool schema was captured for this request." />;
+  }
+  return (
+    <div className="request-tools">
+      {tools.map((tool, index) => (
+        <article className="request-tool-card" key={`${tool.name}-${index}`}>
+          <header>
+            <Wrench size={12} />
+            <strong>{tool.name}</strong>
+          </header>
+          {tool.description ? <p>{tool.description}</p> : null}
+          {tool.schemaPreview ? <pre>{tool.schemaPreview}</pre> : null}
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function RequestResponse({ request }: { request: GenAiRequest }) {
+  return (
+    <PropertiesTable record={{
+      finishReason: request.finishReason,
+      inputTokens: request.inputTokens,
+      outputTokens: request.outputTokens,
+      totalTokens: request.totalTokens,
+      reasoningTokens: request.reasoningTokens,
+      cacheReadInputTokens: request.cacheReadInputTokens,
+      cacheCreationInputTokens: request.cacheCreationInputTokens,
+      providerMetadataPreview: request.providerMetadataPreview
+    }} />
+  );
+}
+
+function RequestWire({ request, primarySpan }: { request: GenAiRequest; primarySpan: TraceDetail["spans"][number] | undefined }) {
+  return (
+    <div className="request-wire">
+      <PropertiesTable record={{
+        primarySpanId: request.primarySpanId,
+        relatedSpanIds: request.relatedSpanIds,
+        serviceName: request.serviceName,
+        operation: request.operation,
+        spanName: request.name
+      }} />
+      {primarySpan ? <PropertiesTable record={primarySpan.attributes} /> : <InlineEmpty icon={Braces} message="Primary span attributes are not available." />}
+    </div>
+  );
 }
 
 function RagPanel({ rag }: { rag: TraceDetail["genAi"]["rag"] }) {

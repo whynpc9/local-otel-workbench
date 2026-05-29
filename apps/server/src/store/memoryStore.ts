@@ -469,14 +469,20 @@ export function summarizeGenAi(spans: NormalizedSpan[]): GenAiTraceSummary {
     .filter((span) => span.kind !== "unknown");
   const inputTokens = sumDefined(genAiSpans.map((span) => span.inputTokens));
   const outputTokens = sumDefined(genAiSpans.map((span) => span.outputTokens));
-  const totalTokens = inputTokens !== undefined || outputTokens !== undefined ? (inputTokens ?? 0) + (outputTokens ?? 0) : undefined;
+  const reportedTotalTokens = sumDefined(genAiSpans.map((span) => span.totalTokens));
+  const totalTokens = reportedTotalTokens ?? (inputTokens !== undefined || outputTokens !== undefined ? (inputTokens ?? 0) + (outputTokens ?? 0) : undefined);
+  const reasoningTokens = sumDefined(genAiSpans.map((span) => span.reasoningTokens));
+  const cacheReadInputTokens = sumDefined(genAiSpans.map((span) => span.cacheReadInputTokens));
+  const cacheCreationInputTokens = sumDefined(genAiSpans.map((span) => span.cacheCreationInputTokens));
+  const finishReasons = [...new Set(genAiSpans.map((span) => span.finishReason).filter((value): value is string => Boolean(value)))];
+  const providerMetadataCount = genAiSpans.filter((span) => Boolean(span.providerMetadataPreview)).length;
   const longest = genAiSpans
     .filter((span) => span.durationNano !== undefined)
     .sort((a, b) => (b.durationNano ?? 0) - (a.durationNano ?? 0))[0];
 
   return {
     spans: genAiSpans,
-    timeline: genAiSpans
+    timeline: [...genAiSpans]
       .sort((a, b) => Number(a.startTimeUnixNano) - Number(b.startTimeUnixNano))
       .map((span) => ({
         spanId: span.spanId,
@@ -491,8 +497,15 @@ export function summarizeGenAi(spans: NormalizedSpan[]): GenAiTraceSummary {
         model: span.model,
         toolName: span.toolName,
         inputTokens: span.inputTokens,
-        outputTokens: span.outputTokens
+        outputTokens: span.outputTokens,
+        totalTokens: span.totalTokens,
+        reasoningTokens: span.reasoningTokens,
+        cacheReadInputTokens: span.cacheReadInputTokens,
+        cacheCreationInputTokens: span.cacheCreationInputTokens,
+        finishReason: span.finishReason,
+        providerMetadataPreview: span.providerMetadataPreview
       })),
+    requests: buildGenAiRequests(spans, genAiSpans),
     conversation: buildTraceConversation(spans, genAiSpans).slice(0, 80),
     rag: {
       retrievalSpanCount: genAiSpans.filter((span) => span.kind === "retrieval").length,
@@ -508,6 +521,11 @@ export function summarizeGenAi(spans: NormalizedSpan[]): GenAiTraceSummary {
     inputTokens,
     outputTokens,
     totalTokens,
+    reasoningTokens,
+    cacheReadInputTokens,
+    cacheCreationInputTokens,
+    finishReasons,
+    providerMetadataCount,
     estimatedCostUsd: estimateCostUsd(genAiSpans),
     toolCallCount: genAiSpans.filter((span) => span.kind === "tool.call" || span.kind === "mcp.tool").length,
     failedToolCallCount: genAiSpans.filter((span) => (span.kind === "tool.call" || span.kind === "mcp.tool") && span.error).length
@@ -548,6 +566,7 @@ function classifyGenAiSpan(span: NormalizedSpan) {
     spanId: span.spanId,
     parentSpanId: span.parentSpanId,
     kind,
+    operation,
     name: span.name,
     serviceName: span.serviceName,
     startTimeUnixNano: span.startTimeUnixNano,
@@ -557,12 +576,115 @@ function classifyGenAiSpan(span: NormalizedSpan) {
     model: readFirstString(attrs, ["gen_ai.request.model", "llm.model_name", "gen_ai.response.model", "ai.response.model", "ai.model.id", "model_name"]),
     inputTokens: readNumber(attrs, "gen_ai.usage.input_tokens") ?? readNumber(attrs, "llm.token_count.prompt") ?? readNumber(attrs, "llm.usage.prompt_tokens") ?? readNumber(attrs, "ai.usage.promptTokens"),
     outputTokens: readNumber(attrs, "gen_ai.usage.output_tokens") ?? readNumber(attrs, "llm.token_count.completion") ?? readNumber(attrs, "llm.usage.completion_tokens") ?? readNumber(attrs, "ai.usage.completionTokens"),
+    totalTokens: readFirstNumber(attrs, ["gen_ai.usage.total_tokens", "llm.usage.total_tokens", "ai.usage.totalTokens"]),
+    reasoningTokens: readFirstNumber(attrs, [
+      "ai.usage.reasoningTokens",
+      "ai.usage.outputTokenDetails.reasoningTokens",
+      "gen_ai.usage.reasoning_tokens",
+      "llm.usage.reasoning_tokens"
+    ]),
+    cacheReadInputTokens: readFirstNumber(attrs, [
+      "ai.usage.cachedInputTokens",
+      "ai.usage.inputTokenDetails.cacheReadTokens",
+      "gen_ai.usage.cache_read_input_tokens",
+      "gen_ai.usage.input_tokens.cached",
+      "llm.usage.cache_read_input_tokens"
+    ]),
+    cacheCreationInputTokens: readFirstNumber(attrs, [
+      "ai.usage.cacheCreationInputTokens",
+      "ai.usage.inputTokenDetails.cacheCreationTokens",
+      "gen_ai.usage.cache_creation_input_tokens",
+      "llm.usage.cache_creation_input_tokens"
+    ]),
+    finishReason: readFirstContentString(attrs, [
+      "ai.response.finishReason",
+      "gen_ai.response.finish_reason",
+      "gen_ai.response.finish_reasons",
+      "llm.response.finish_reason",
+      "finish_reason"
+    ]),
+    providerMetadataPreview: readProviderMetadataPreview(attrs),
     toolName: readString(attrs, "tool.name") ?? readString(attrs, "mcp.tool.name") ?? readString(attrs, "function.name") ?? readString(attrs, "ai.toolCall.name"),
     retrievedDocCount: readNumber(attrs, "retrieval.documents.count") ?? readNumber(attrs, "rag.retrieved_doc_count") ?? readNumber(attrs, "retrieved_document_count"),
     retrievedDocuments: extractRagDocuments(attrs),
     conversationTurns: extractConversationTurns(span),
     redactedContentKeys: Object.keys(attrs).filter((key) => typeof attrs[key] === "string" && String(attrs[key]).includes("[redacted"))
   };
+}
+
+function buildGenAiRequests(spans: NormalizedSpan[], genAiSpans: ReturnType<typeof classifyGenAiSpan>[]) {
+  const spanById = new Map(spans.map((span) => [span.spanId, span]));
+  const hasAiSdkProviderCall = genAiSpans.some((span) => isAiSdkProviderCall(span.name));
+  return genAiSpans
+    .filter((span) => isLlmRequestSpan(span, hasAiSdkProviderCall))
+    .sort((a, b) => Number(a.startTimeUnixNano) - Number(b.startTimeUnixNano))
+    .map((span, index) => {
+      const rawSpan = spanById.get(span.spanId);
+      const relatedSpanIds = collectDescendantSpanIds(span.spanId, spans);
+      return {
+        id: `${span.spanId}:${index + 1}`,
+        primarySpanId: span.spanId,
+        relatedSpanIds,
+        name: span.name,
+        label: span.model ?? span.operation ?? span.name,
+        serviceName: span.serviceName,
+        provider: span.provider,
+        model: span.model,
+        operation: span.operation,
+        startTimeUnixNano: span.startTimeUnixNano,
+        durationNano: span.durationNano ?? 0,
+        status: span.error ? "error" as const : "ok" as const,
+        inputTokens: span.inputTokens,
+        outputTokens: span.outputTokens,
+        totalTokens: span.totalTokens,
+        reasoningTokens: span.reasoningTokens,
+        cacheReadInputTokens: span.cacheReadInputTokens,
+        cacheCreationInputTokens: span.cacheCreationInputTokens,
+        finishReason: span.finishReason,
+        providerMetadataPreview: span.providerMetadataPreview,
+        messages: span.conversationTurns,
+        offeredTools: rawSpan ? extractOfferedTools(rawSpan.attributes).slice(0, 80) : []
+      };
+    });
+}
+
+function isLlmRequestSpan(span: ReturnType<typeof classifyGenAiSpan>, hasAiSdkProviderCall: boolean) {
+  if (hasAiSdkProviderCall && isAiSdkWrapperSpan(span.name)) {
+    return false;
+  }
+  if (isAiSdkProviderCall(span.name)) {
+    return true;
+  }
+  return span.kind === "llm.chat" || span.kind === "llm.completion";
+}
+
+function isAiSdkProviderCall(name: string) {
+  return /^ai\.(generateText|streamText|generateObject|streamObject)\.do/i.test(name);
+}
+
+function isAiSdkWrapperSpan(name: string) {
+  return /^ai\.(generateText|streamText|generateObject|streamObject)$/i.test(name);
+}
+
+function collectDescendantSpanIds(rootSpanId: string, spans: NormalizedSpan[]) {
+  const childrenByParent = new Map<string, NormalizedSpan[]>();
+  for (const span of spans) {
+    if (!span.parentSpanId) continue;
+    const children = childrenByParent.get(span.parentSpanId) ?? [];
+    children.push(span);
+    childrenByParent.set(span.parentSpanId, children);
+  }
+
+  const result: string[] = [];
+  const stack = [rootSpanId];
+  while (stack.length > 0) {
+    const spanId = stack.shift()!;
+    result.push(spanId);
+    for (const child of childrenByParent.get(spanId) ?? []) {
+      stack.push(child.spanId);
+    }
+  }
+  return result;
 }
 
 function estimateCostUsd(spans: ReturnType<typeof classifyGenAiSpan>[]): number | undefined {
@@ -602,12 +724,89 @@ function readNumber(attrs: Record<string, unknown>, key: string): number | undef
   return undefined;
 }
 
+function readFirstNumber(attrs: Record<string, unknown>, keys: string[]): number | undefined {
+  for (const key of keys) {
+    const value = readNumber(attrs, key);
+    if (value !== undefined) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
 function sumDefined(values: Array<number | undefined>): number | undefined {
   const present = values.filter((value): value is number => value !== undefined);
   if (present.length === 0) {
     return undefined;
   }
   return present.reduce((sum, value) => sum + value, 0);
+}
+
+function readProviderMetadataPreview(attrs: Record<string, unknown>): string | undefined {
+  const direct = attrs["ai.response.providerMetadata"]
+    ?? attrs["gen_ai.response.provider_metadata"]
+    ?? attrs["llm.response.provider_metadata"];
+  const directPreview = providerMetadataValuePreview(direct);
+  if (directPreview) {
+    return directPreview;
+  }
+
+  const collected: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(attrs)) {
+    for (const prefix of ["ai.response.providerMetadata.", "gen_ai.response.provider_metadata.", "llm.response.provider_metadata."]) {
+      if (key.startsWith(prefix)) {
+        collected[key.slice(prefix.length)] = value;
+      }
+    }
+  }
+  return providerMetadataValuePreview(Object.keys(collected).length > 0 ? collected : undefined);
+}
+
+function providerMetadataValuePreview(value: unknown): string | undefined {
+  const flat = flattenContentValue(value);
+  return flat ? truncate(flat, 1200) : undefined;
+}
+
+function extractOfferedTools(attrs: Record<string, unknown>) {
+  const direct = attrs["ai.prompt.tools"]
+    ?? attrs["gen_ai.request.tools"]
+    ?? attrs["llm.request.tools"]
+    ?? attrs["tools"];
+  const directTools = parseMaybeJsonArray(direct);
+  if (directTools) {
+    return directTools.map(normalizeOfferedTool).filter((tool) => Boolean(tool.name));
+  }
+
+  const grouped = new Map<string, Record<string, unknown>>();
+  for (const [key, value] of Object.entries(attrs)) {
+    const match = key.match(/(?:ai\.prompt\.tools|gen_ai\.request\.tools|llm\.request\.tools|tools)\.(\d+)\.(.+)/);
+    if (!match) continue;
+    const entry = grouped.get(match[1]!) ?? {};
+    entry[match[2]!] = value;
+    grouped.set(match[1]!, entry);
+  }
+  return [...grouped.values()].map(normalizeOfferedTool).filter((tool) => Boolean(tool.name));
+}
+
+function normalizeOfferedTool(value: unknown) {
+  const record = isRecord(value) ? value : {};
+  const fn = isRecord(record.function) ? record.function as Record<string, unknown> : record;
+  const name = readString(fn, "name")
+    ?? readString(record, "name")
+    ?? readString(record, "toolName")
+    ?? readString(record, "function.name")
+    ?? "unknown_tool";
+  const description = readString(fn, "description")
+    ?? readString(record, "description")
+    ?? readString(record, "function.description");
+  const schema = fn.parameters
+    ?? fn.inputSchema
+    ?? record.parameters
+    ?? record.inputSchema
+    ?? record.schema
+    ?? record["function.parameters"];
+  const schemaPreview = schema === undefined ? undefined : truncate(safeStringify(schema) ?? String(schema), 1200);
+  return { name, description, schemaPreview };
 }
 
 function extractRagDocuments(attrs: Record<string, unknown>) {
@@ -1309,6 +1508,16 @@ function addTurn(
 function readFirstString(attrs: Record<string, unknown>, keys: string[]) {
   for (const key of keys) {
     const value = readContentString(attrs, key);
+    if (value) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function readFirstContentString(attrs: Record<string, unknown>, keys: string[]) {
+  for (const key of keys) {
+    const value = flattenContentValue(attrs[key]);
     if (value) {
       return value;
     }

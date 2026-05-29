@@ -66,6 +66,12 @@ export interface TraceDetail extends TraceSummary {
       model?: string | undefined;
       inputTokens?: number | undefined;
       outputTokens?: number | undefined;
+      totalTokens?: number | undefined;
+      reasoningTokens?: number | undefined;
+      cacheReadInputTokens?: number | undefined;
+      cacheCreationInputTokens?: number | undefined;
+      finishReason?: string | undefined;
+      providerMetadataPreview?: string | undefined;
       toolName?: string | undefined;
       durationNano?: number | undefined;
       error?: boolean | undefined;
@@ -85,6 +91,47 @@ export interface TraceDetail extends TraceSummary {
       toolName?: string | undefined;
       inputTokens?: number | undefined;
       outputTokens?: number | undefined;
+      totalTokens?: number | undefined;
+      reasoningTokens?: number | undefined;
+      cacheReadInputTokens?: number | undefined;
+      cacheCreationInputTokens?: number | undefined;
+      finishReason?: string | undefined;
+      providerMetadataPreview?: string | undefined;
+    }>;
+    requests: Array<{
+      id: string;
+      primarySpanId: string;
+      relatedSpanIds: string[];
+      name: string;
+      label: string;
+      serviceName?: string | undefined;
+      provider?: string | undefined;
+      model?: string | undefined;
+      operation?: string | undefined;
+      startTimeUnixNano: string;
+      durationNano: number;
+      status: "ok" | "error";
+      inputTokens?: number | undefined;
+      outputTokens?: number | undefined;
+      totalTokens?: number | undefined;
+      reasoningTokens?: number | undefined;
+      cacheReadInputTokens?: number | undefined;
+      cacheCreationInputTokens?: number | undefined;
+      finishReason?: string | undefined;
+      providerMetadataPreview?: string | undefined;
+      messages: Array<{
+        spanId: string;
+        role: "system" | "user" | "assistant" | "tool";
+        kind: "message" | "tool-call" | "tool-result";
+        name?: string | undefined;
+        contentPreview: string;
+        reasoningPreview?: string | undefined;
+      }>;
+      offeredTools: Array<{
+        name: string;
+        description?: string | undefined;
+        schemaPreview?: string | undefined;
+      }>;
     }>;
     conversation: Array<{
       spanId: string;
@@ -115,6 +162,11 @@ export interface TraceDetail extends TraceSummary {
     inputTokens?: number | undefined;
     outputTokens?: number | undefined;
     totalTokens?: number | undefined;
+    reasoningTokens?: number | undefined;
+    cacheReadInputTokens?: number | undefined;
+    cacheCreationInputTokens?: number | undefined;
+    finishReasons: string[];
+    providerMetadataCount: number;
     estimatedCostUsd?: number | undefined;
     toolCallCount: number;
     failedToolCallCount: number;

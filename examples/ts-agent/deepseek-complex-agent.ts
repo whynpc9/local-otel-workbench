@@ -63,6 +63,58 @@ const incidentDocs = [
   }
 ];
 
+const offeredToolsCatalog = [
+  {
+    name: "searchIncidents",
+    description: "Search local incident runbooks and trace-pattern notes for a service symptom.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        service: { type: "string", description: "Service name, for example checkout-api" },
+        symptom: { type: "string", description: "Observed symptom or incident clue" }
+      },
+      required: ["service", "symptom"]
+    }
+  },
+  {
+    name: "getServiceMetrics",
+    description: "Read a compact metrics snapshot for a service.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        service: { type: "string" },
+        windowMinutes: { type: "number", minimum: 1, maximum: 120 }
+      },
+      required: ["service", "windowMinutes"]
+    }
+  },
+  {
+    name: "inspectTraceSample",
+    description: "Inspect a representative distributed trace and return relevant spans.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        service: { type: "string" },
+        traceHint: { type: "string", description: "Short hint for selecting a trace sample" }
+      },
+      required: ["service", "traceHint"]
+    }
+  },
+  {
+    name: "createRemediationPlan",
+    description: "Create a remediation plan from evidence, owner, and risk level.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        owner: { type: "string" },
+        riskLevel: { type: "string", enum: ["low", "medium", "high"] },
+        evidence: { type: "array", items: { type: "string" }, minItems: 1 }
+      },
+      required: ["owner", "riskLevel", "evidence"]
+    }
+  }
+] satisfies Array<{ name: string; description: string; inputSchema: JsonObject }>;
+
 const tools = {
   searchIncidents: tool({
     description: "Search local incident runbooks and trace-pattern notes for a service symptom.",
@@ -181,6 +233,8 @@ Now do a second validation round. Use getServiceMetrics and createRemediationPla
 Focus on whether the remediation is safe to test in a local replay environment.
 `);
 
+      await recordRequestViewCoverageSpan(triage, validation);
+
       sessionSpan.setAttribute("agent.rounds", 2);
       sessionSpan.setAttribute("agent.triage.steps", triage.steps.length);
       sessionSpan.setAttribute("agent.validation.steps", validation.steps.length);
@@ -290,8 +344,122 @@ async function recordRetrievalSpan(toolName: string, documents: typeof incidentD
   });
 }
 
+async function recordRequestViewCoverageSpan(
+  triage: Awaited<ReturnType<typeof runAgentStep>>,
+  validation: Awaited<ReturnType<typeof runAgentStep>>
+): Promise<void> {
+  await tracer.startActiveSpan("llm.request.requests_view_fixture", {
+    attributes: {
+      "openinference.span.kind": "llm",
+      "gen_ai.provider.name": "deepseek",
+      "gen_ai.request.model": modelName,
+      "gen_ai.operation.name": "chat",
+      "gen_ai.usage.input_tokens": totalUsage(triage, "inputTokens") + totalUsage(validation, "inputTokens"),
+      "gen_ai.usage.output_tokens": totalUsage(triage, "outputTokens") + totalUsage(validation, "outputTokens"),
+      "gen_ai.usage.total_tokens": totalKnownUsage(triage) + totalKnownUsage(validation),
+      "ai.usage.promptTokens": totalUsage(triage, "inputTokens") + totalUsage(validation, "inputTokens"),
+      "ai.usage.completionTokens": totalUsage(triage, "outputTokens") + totalUsage(validation, "outputTokens"),
+      "ai.usage.totalTokens": totalKnownUsage(triage) + totalKnownUsage(validation),
+      "ai.usage.cachedInputTokens": cachedInputTokens(triage) + cachedInputTokens(validation),
+      "ai.usage.inputTokenDetails.cacheReadTokens": cachedInputTokens(triage) + cachedInputTokens(validation),
+      "ai.usage.reasoningTokens": reasoningTokens(triage) + reasoningTokens(validation),
+      "ai.usage.outputTokenDetails.reasoningTokens": reasoningTokens(triage) + reasoningTokens(validation),
+      "ai.response.finishReason": finishReason(validation) ?? finishReason(triage) ?? "stop",
+      "ai.response.providerMetadata": JSON.stringify(providerMetadata(validation) ?? providerMetadata(triage) ?? {
+        deepseek: {
+          promptCacheHitTokens: cachedInputTokens(triage) + cachedInputTokens(validation),
+          reasoningTokens: reasoningTokens(triage) + reasoningTokens(validation),
+          source: "request-view-coverage"
+        }
+      }),
+      "ai.prompt.tools": JSON.stringify(offeredToolsCatalog),
+      "ai.prompt.messages": JSON.stringify([
+        { role: "system", content: "You are validating Local OTel Workbench request-level GenAI inspection." },
+        { role: "user", content: [{ type: "text", text: "Validate LLM request overview, flow, messages, offered tools, response metadata, cache, and reasoning token fields." }] },
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "I will create a compact remediation plan so the request inspector can show a tool call." },
+            {
+              type: "tool_call",
+              name: "createRemediationPlan",
+              arguments: {
+                owner: "sre-platform",
+                riskLevel: "medium",
+                evidence: ["cache tokens captured", "reasoning tokens captured", "provider metadata captured"]
+              }
+            }
+          ]
+        },
+        {
+          role: "tool",
+          content: [{
+            type: "tool_result",
+            name: "createRemediationPlan",
+            result: {
+              owner: "sre-platform",
+              riskLevel: "medium",
+              actions: ["Open the Requests tab", "Check offered tool schema", "Check response metadata"]
+            }
+          }]
+        }
+      ]),
+      "ai.response.text": "Request inspector coverage fixture completed.",
+      "ai.response.messages": JSON.stringify([
+        { role: "assistant", content: [{ type: "text", text: "Request inspector coverage fixture completed." }] }
+      ]),
+      "ai.response.toolCalls": JSON.stringify([{
+        name: "createRemediationPlan",
+        arguments: {
+          owner: "sre-platform",
+          riskLevel: "medium",
+          evidence: ["cache tokens captured", "reasoning tokens captured", "provider metadata captured"]
+        }
+      }])
+    }
+  }, async (span) => {
+    span.end();
+  });
+}
+
 function totalUsage(result: Awaited<ReturnType<typeof runAgentStep>>, field: "inputTokens" | "outputTokens"): number {
   return result.usage[field] ?? 0;
+}
+
+function totalKnownUsage(result: Awaited<ReturnType<typeof runAgentStep>>): number {
+  const usage = result.usage as Record<string, unknown>;
+  const total = numberValue(usage.totalTokens);
+  if (total !== undefined) {
+    return total;
+  }
+  return totalUsage(result, "inputTokens") + totalUsage(result, "outputTokens");
+}
+
+function cachedInputTokens(result: Awaited<ReturnType<typeof runAgentStep>>): number {
+  const usage = result.usage as Record<string, unknown>;
+  return numberValue(usage.cachedInputTokens) ?? numberValue((usage.inputTokenDetails as Record<string, unknown> | undefined)?.cacheReadTokens) ?? 0;
+}
+
+function reasoningTokens(result: Awaited<ReturnType<typeof runAgentStep>>): number {
+  const usage = result.usage as Record<string, unknown>;
+  return numberValue(usage.reasoningTokens) ?? numberValue((usage.outputTokenDetails as Record<string, unknown> | undefined)?.reasoningTokens) ?? 0;
+}
+
+function finishReason(result: Awaited<ReturnType<typeof runAgentStep>>): string | undefined {
+  const value = (result as unknown as { finishReason?: unknown }).finishReason;
+  return typeof value === "string" ? value : undefined;
+}
+
+function providerMetadata(result: Awaited<ReturnType<typeof runAgentStep>>): unknown {
+  const direct = (result as unknown as { providerMetadata?: unknown }).providerMetadata;
+  if (direct) {
+    return direct;
+  }
+  return result.steps.find((step) => (step as unknown as { providerMetadata?: unknown }).providerMetadata)?.providerMetadata;
+}
+
+function numberValue(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 function markSpanError(span: { recordException(error: Error): void; setStatus(status: { code: SpanStatusCode; message?: string }): void }, error: unknown): void {
