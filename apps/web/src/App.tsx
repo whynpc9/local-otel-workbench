@@ -76,6 +76,48 @@ const nav: Array<{ id: PageKey; label: string; icon: typeof GitBranch; hint: str
   { id: "Settings", label: "Settings", icon: SettingsIcon, hint: "Endpoints & storage" }
 ];
 
+// URL routing — Next.js-style clean path segments per page, with a dynamic
+// `/traces/<traceId>` segment for the trace detail view. The dashboard stays a
+// Vite SPA; both the dev server and the Fastify static handler fall back to
+// index.html so these deep links survive refresh / direct navigation.
+const PAGE_PATH: Record<PageKey, string> = {
+  Resources: "/resources",
+  Logs: "/logs",
+  Traces: "/traces",
+  Metrics: "/metrics",
+  GenAI: "/genai",
+  Settings: "/settings"
+};
+
+const PATH_PAGE: Record<string, PageKey> = {
+  resources: "Resources",
+  logs: "Logs",
+  traces: "Traces",
+  metrics: "Metrics",
+  genai: "GenAI",
+  settings: "Settings"
+};
+
+type Route = { page: PageKey; traceId: string };
+
+// Pages that expose a selected trace through a dynamic `/<page>/<traceId>`
+// segment. Both Traces and GenAI drive the shared `selectedTraceId` state.
+const TRACE_SEGMENT_PAGES = new Set<PageKey>(["Traces", "GenAI"]);
+
+function parseRoutePath(pathname: string): Route {
+  const [first, second] = pathname.replace(/^\/+|\/+$/g, "").split("/");
+  const page = (first && PATH_PAGE[first.toLowerCase()]) || "Resources";
+  const traceId = TRACE_SEGMENT_PAGES.has(page) && second ? decodeURIComponent(second) : "";
+  return { page, traceId };
+}
+
+function buildRoutePath({ page, traceId }: Route): string {
+  if (TRACE_SEGMENT_PAGES.has(page) && traceId) {
+    return `${PAGE_PATH[page]}/${encodeURIComponent(traceId)}`;
+  }
+  return PAGE_PATH[page];
+}
+
 const REFRESH_INTERVAL_MS = 2000;
 const STALE_THRESHOLD_MS = 30_000;
 
@@ -270,8 +312,9 @@ function SpikeMark({ size = 20 }: { size?: number }) {
 }
 
 export function App() {
-  const [activePage, setActivePage] = useState<PageKey>("Resources");
-  const [selectedTraceId, setSelectedTraceId] = useState("");
+  const initialRoute = useMemo(() => parseRoutePath(window.location.pathname), []);
+  const [activePage, setActivePage] = useState<PageKey>(initialRoute.page);
+  const [selectedTraceId, setSelectedTraceId] = useState(initialRoute.traceId);
   const [selectedSpanId, setSelectedSpanId] = useState("");
   const [selectedMetricKey, setSelectedMetricKey] = useState("");
   const [service, setService] = useState("");
@@ -359,6 +402,30 @@ export function App() {
     }
   });
 
+  const desiredPath = buildRoutePath({ page: activePage, traceId: selectedTraceId });
+  const didMountRoute = useRef(false);
+  useEffect(() => {
+    if (window.location.pathname === desiredPath) {
+      didMountRoute.current = true;
+      return;
+    }
+    // First paint normalizes the URL in place (e.g. "/" -> "/resources") so it
+    // does not pollute history; later state changes push new entries so the
+    // browser back/forward buttons walk the page navigation.
+    window.history[didMountRoute.current ? "pushState" : "replaceState"](null, "", desiredPath);
+    didMountRoute.current = true;
+  }, [desiredPath]);
+
+  useEffect(() => {
+    const onPopState = () => {
+      const next = parseRoutePath(window.location.pathname);
+      setActivePage(next.page);
+      setSelectedTraceId(next.traceId);
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
   useEffect(() => {
     setSelectedSpanId("");
   }, [selectedTraceId]);
@@ -383,6 +450,12 @@ export function App() {
   const pageMeta = currentPageMeta(activePage);
   const showTraceDetail = activePage === "Traces" && Boolean(selectedTraceId);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  useEffect(() => {
+    document.title = selectedTraceId && TRACE_SEGMENT_PAGES.has(activePage)
+      ? `Trace ${selectedTraceId} · OTel Workbench`
+      : `${pageMeta.title} · OTel Workbench`;
+  }, [pageMeta.title, activePage, selectedTraceId]);
 
   useEffect(() => {
     setSidebarOpen(false);
