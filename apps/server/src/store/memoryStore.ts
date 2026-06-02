@@ -467,13 +467,20 @@ export function summarizeGenAi(spans: NormalizedSpan[]): GenAiTraceSummary {
   const genAiSpans = spans
     .map((span) => classifyGenAiSpan(span))
     .filter((span) => span.kind !== "unknown");
-  const inputTokens = sumDefined(genAiSpans.map((span) => span.inputTokens));
-  const outputTokens = sumDefined(genAiSpans.map((span) => span.outputTokens));
-  const reportedTotalTokens = sumDefined(genAiSpans.map((span) => span.totalTokens));
+  // Tokens/cost are reported at multiple span levels (agent.session, agent.step,
+  // AI-SDK wrapper, and the actual provider call), so summing across every GenAI
+  // span double/triple counts. Account only over the canonical LLM request spans
+  // (the same deduplicated set that powers the Requests view), falling back to all
+  // GenAI spans when no request span can be identified.
+  const requestSpans = selectLlmRequestSpans(genAiSpans);
+  const accountingSpans = requestSpans.length > 0 ? requestSpans : genAiSpans;
+  const inputTokens = sumDefined(accountingSpans.map((span) => span.inputTokens));
+  const outputTokens = sumDefined(accountingSpans.map((span) => span.outputTokens));
+  const reportedTotalTokens = sumDefined(accountingSpans.map((span) => span.totalTokens));
   const totalTokens = reportedTotalTokens ?? (inputTokens !== undefined || outputTokens !== undefined ? (inputTokens ?? 0) + (outputTokens ?? 0) : undefined);
-  const reasoningTokens = sumDefined(genAiSpans.map((span) => span.reasoningTokens));
-  const cacheReadInputTokens = sumDefined(genAiSpans.map((span) => span.cacheReadInputTokens));
-  const cacheCreationInputTokens = sumDefined(genAiSpans.map((span) => span.cacheCreationInputTokens));
+  const reasoningTokens = sumDefined(accountingSpans.map((span) => span.reasoningTokens));
+  const cacheReadInputTokens = sumDefined(accountingSpans.map((span) => span.cacheReadInputTokens));
+  const cacheCreationInputTokens = sumDefined(accountingSpans.map((span) => span.cacheCreationInputTokens));
   const finishReasons = [...new Set(genAiSpans.map((span) => span.finishReason).filter((value): value is string => Boolean(value)))];
   const providerMetadataCount = genAiSpans.filter((span) => Boolean(span.providerMetadataPreview)).length;
   const longest = genAiSpans
@@ -526,7 +533,7 @@ export function summarizeGenAi(spans: NormalizedSpan[]): GenAiTraceSummary {
     cacheCreationInputTokens,
     finishReasons,
     providerMetadataCount,
-    estimatedCostUsd: estimateCostUsd(genAiSpans),
+    estimatedCostUsd: estimateCostUsd(accountingSpans),
     toolCallCount: genAiSpans.filter((span) => span.kind === "tool.call" || span.kind === "mcp.tool").length,
     failedToolCallCount: genAiSpans.filter((span) => (span.kind === "tool.call" || span.kind === "mcp.tool") && span.error).length
   };
@@ -605,6 +612,8 @@ function classifyGenAiSpan(span: NormalizedSpan) {
     ]),
     providerMetadataPreview: readProviderMetadataPreview(attrs),
     toolName: readString(attrs, "tool.name") ?? readString(attrs, "mcp.tool.name") ?? readString(attrs, "function.name") ?? readString(attrs, "ai.toolCall.name"),
+    toolCallArgsPreview: readToolCallArgsPreview(attrs),
+    toolCallResultPreview: readToolCallResultPreview(attrs),
     retrievedDocCount: readNumber(attrs, "retrieval.documents.count") ?? readNumber(attrs, "rag.retrieved_doc_count") ?? readNumber(attrs, "retrieved_document_count"),
     retrievedDocuments: extractRagDocuments(attrs),
     conversationTurns: extractConversationTurns(span),
@@ -612,11 +621,14 @@ function classifyGenAiSpan(span: NormalizedSpan) {
   };
 }
 
+function selectLlmRequestSpans(genAiSpans: ReturnType<typeof classifyGenAiSpan>[]) {
+  const hasAiSdkProviderCall = genAiSpans.some((span) => isAiSdkProviderCall(span.name));
+  return genAiSpans.filter((span) => isLlmRequestSpan(span, hasAiSdkProviderCall));
+}
+
 function buildGenAiRequests(spans: NormalizedSpan[], genAiSpans: ReturnType<typeof classifyGenAiSpan>[]) {
   const spanById = new Map(spans.map((span) => [span.spanId, span]));
-  const hasAiSdkProviderCall = genAiSpans.some((span) => isAiSdkProviderCall(span.name));
-  return genAiSpans
-    .filter((span) => isLlmRequestSpan(span, hasAiSdkProviderCall))
+  return selectLlmRequestSpans(genAiSpans)
     .sort((a, b) => Number(a.startTimeUnixNano) - Number(b.startTimeUnixNano))
     .map((span, index) => {
       const rawSpan = spanById.get(span.spanId);
@@ -694,10 +706,7 @@ function estimateCostUsd(spans: ReturnType<typeof classifyGenAiSpan>[]): number 
     const model = span.model?.toLowerCase() ?? "";
     const input = span.inputTokens ?? 0;
     const output = span.outputTokens ?? 0;
-    const rate = model.includes("gpt-4.1") ? { input: 0.002, output: 0.008 } :
-      model.includes("gpt-4o") ? { input: 0.005, output: 0.015 } :
-      model.includes("claude") ? { input: 0.003, output: 0.015 } :
-      undefined;
+    const rate = resolveModelRate(model);
     if (!rate || (input === 0 && output === 0)) {
       continue;
     }
@@ -705,6 +714,23 @@ function estimateCostUsd(spans: ReturnType<typeof classifyGenAiSpan>[]): number 
     total += (input / 1000) * rate.input + (output / 1000) * rate.output;
   }
   return found ? Number(total.toFixed(6)) : undefined;
+}
+
+// Approximate public list prices in USD per 1K tokens. Best-effort only: used to
+// give an order-of-magnitude cost signal during agent development, not billing.
+function resolveModelRate(model: string): { input: number; output: number } | undefined {
+  if (model.includes("deepseek-reasoner")) return { input: 0.00055, output: 0.00219 };
+  if (model.includes("deepseek")) return { input: 0.00027, output: 0.0011 };
+  if (model.includes("gpt-4.1-mini")) return { input: 0.0004, output: 0.0016 };
+  if (model.includes("gpt-4.1")) return { input: 0.002, output: 0.008 };
+  if (model.includes("gpt-4o-mini")) return { input: 0.00015, output: 0.0006 };
+  if (model.includes("gpt-4o")) return { input: 0.005, output: 0.015 };
+  if (model.includes("o3") || model.includes("o1")) return { input: 0.01, output: 0.04 };
+  if (model.includes("claude-3-5-haiku") || model.includes("claude-haiku")) return { input: 0.0008, output: 0.004 };
+  if (model.includes("claude")) return { input: 0.003, output: 0.015 };
+  if (model.includes("gemini-1.5-flash") || model.includes("gemini-2.0-flash") || model.includes("gemini-flash")) return { input: 0.000075, output: 0.0003 };
+  if (model.includes("gemini")) return { input: 0.00125, output: 0.005 };
+  return undefined;
 }
 
 function readString(attrs: Record<string, unknown>, key: string): string | undefined {
@@ -842,6 +868,35 @@ function normalizeRagDocument(value: unknown) {
     score: readNumber(record, "score") ?? readNumber(record, "document.score"),
     contentPreview: content ? truncate(content, 220) : undefined
   };
+}
+
+function readToolCallArgsPreview(attrs: Record<string, unknown>): string | undefined {
+  const raw = readFirstString(attrs, [
+    "ai.toolCall.args",
+    "tool.arguments",
+    "tool.args",
+    "tool.input",
+    "gen_ai.tool.input",
+    "function.arguments"
+  ]);
+  return raw ? formatToolPayloadPreview(raw) : undefined;
+}
+
+function readToolCallResultPreview(attrs: Record<string, unknown>): string | undefined {
+  const raw = readFirstString(attrs, [
+    "ai.toolCall.result",
+    "tool.result",
+    "tool.output",
+    "gen_ai.tool.output",
+    "function.result"
+  ]);
+  return raw ? formatToolPayloadPreview(raw) : undefined;
+}
+
+function formatToolPayloadPreview(raw: string): string {
+  const parsed = parseMaybeJsonObject(raw) ?? parseMaybeJsonArray(raw);
+  const pretty = parsed !== undefined ? safeStringify(parsed) ?? raw : raw;
+  return truncate(pretty, 2000);
 }
 
 function readToolNameFromAttrs(attrs: Record<string, unknown>): string | undefined {

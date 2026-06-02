@@ -134,6 +134,7 @@ export interface GenAiTraceSummary {
     serviceName?: string | undefined;
     provider?: string | undefined;
     model?: string | undefined;
+    startTimeUnixNano?: string | undefined;
     inputTokens?: number | undefined;
     outputTokens?: number | undefined;
     totalTokens?: number | undefined;
@@ -143,6 +144,8 @@ export interface GenAiTraceSummary {
     finishReason?: string | undefined;
     providerMetadataPreview?: string | undefined;
     toolName?: string | undefined;
+    toolCallArgsPreview?: string | undefined;
+    toolCallResultPreview?: string | undefined;
     durationNano?: number | undefined;
     error?: boolean | undefined;
     redactedContentKeys?: string[] | undefined;

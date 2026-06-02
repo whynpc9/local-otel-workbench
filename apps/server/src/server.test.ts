@@ -636,6 +636,109 @@ describe("OTLP HTTP receiver", () => {
     ]);
   });
 
+  it("accounts tokens/cost from canonical LLM request spans without double counting nested wrappers", async () => {
+    running = await startServers({
+      host: "127.0.0.1",
+      dashboardPort: 0,
+      otlpHttpPort: 0,
+      otlpGrpcPort: 0,
+      storage: "memory",
+      dbPath: ":memory:",
+      maxBatches: 100,
+      maxLogs: 100,
+      maxSpans: 100,
+      maxMetrics: 100
+    });
+
+    await postJson(`${addressUrl(running.otlp)}/v1/traces`, {
+      resourceSpans: [
+        {
+          resource: { attributes: [{ key: "service.name", value: { stringValue: "agent-svc" } }] },
+          scopeSpans: [
+            {
+              scope: { name: "demo" },
+              spans: [
+                {
+                  traceId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  spanId: "1111111111111111",
+                  name: "agent.step.triage",
+                  kind: 1,
+                  startTimeUnixNano: "1715840000000000000",
+                  endTimeUnixNano: "1715840002000000000",
+                  attributes: [
+                    { key: "openinference.span.kind", value: { stringValue: "agent" } },
+                    { key: "gen_ai.provider.name", value: { stringValue: "deepseek" } },
+                    { key: "gen_ai.request.model", value: { stringValue: "deepseek-chat" } },
+                    { key: "gen_ai.usage.input_tokens", value: { intValue: 100 } },
+                    { key: "gen_ai.usage.output_tokens", value: { intValue: 20 } }
+                  ],
+                  status: { code: 1 }
+                },
+                {
+                  traceId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  spanId: "2222222222222222",
+                  parentSpanId: "1111111111111111",
+                  name: "ai.generateText.doGenerate",
+                  kind: 3,
+                  startTimeUnixNano: "1715840000100000000",
+                  endTimeUnixNano: "1715840001000000000",
+                  attributes: [
+                    { key: "ai.model.provider", value: { stringValue: "deepseek" } },
+                    { key: "ai.model.id", value: { stringValue: "deepseek-chat" } },
+                    { key: "ai.operationId", value: { stringValue: "ai.generateText" } },
+                    { key: "ai.usage.promptTokens", value: { intValue: 100 } },
+                    { key: "ai.usage.completionTokens", value: { intValue: 20 } },
+                    { key: "ai.usage.totalTokens", value: { intValue: 120 } }
+                  ],
+                  status: { code: 1 }
+                },
+                {
+                  traceId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  spanId: "3333333333333333",
+                  parentSpanId: "1111111111111111",
+                  name: "tool.searchIncidents",
+                  kind: 1,
+                  startTimeUnixNano: "1715840001100000000",
+                  endTimeUnixNano: "1715840001150000000",
+                  attributes: [
+                    { key: "openinference.span.kind", value: { stringValue: "tool" } },
+                    { key: "tool.name", value: { stringValue: "searchIncidents" } },
+                    { key: "ai.toolCall.name", value: { stringValue: "searchIncidents" } },
+                    { key: "ai.toolCall.args", value: { stringValue: "{\"service\":\"checkout-api\"}" } },
+                    { key: "ai.toolCall.result", value: { stringValue: "{\"documents\":2}" } }
+                  ],
+                  status: { code: 1 }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    });
+
+    const detail = await fetchJson<{ trace: { genAi: {
+      spans: Array<{ kind: string; toolName?: string; toolCallArgsPreview?: string; toolCallResultPreview?: string }>;
+      requests: Array<unknown>;
+      inputTokens?: number;
+      outputTokens?: number;
+      totalTokens?: number;
+      estimatedCostUsd?: number;
+      toolCallCount: number;
+    } } }>(`${addressUrl(running.dashboard)}/api/traces/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`);
+
+    // Only the single provider call should be counted, not the agent.step wrapper.
+    expect(detail.trace.genAi.requests).toHaveLength(1);
+    expect(detail.trace.genAi.inputTokens).toBe(100);
+    expect(detail.trace.genAi.outputTokens).toBe(20);
+    expect(detail.trace.genAi.totalTokens).toBe(120);
+    // deepseek-chat priced at 0.00027/0.0011 per 1K tokens.
+    expect(detail.trace.genAi.estimatedCostUsd).toBeCloseTo((100 / 1000) * 0.00027 + (20 / 1000) * 0.0011, 6);
+
+    const toolSpan = detail.trace.genAi.spans.find((span) => span.toolName === "searchIncidents");
+    expect(toolSpan?.toolCallArgsPreview).toContain("checkout-api");
+    expect(toolSpan?.toolCallResultPreview).toContain("documents");
+  });
+
   it("extracts conversation turns from indexed GenAI prompt and completion attributes", async () => {
     running = await startServers({
       host: "127.0.0.1",

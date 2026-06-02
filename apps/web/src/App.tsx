@@ -6,6 +6,7 @@ import {
   AlertCircle,
   AlertTriangle,
   ArrowLeft,
+  ArrowRight,
   Bot,
   Boxes,
   Braces,
@@ -2101,6 +2102,12 @@ function GenAiDetail({ trace, onOpenInTraces, onOpenLogs }: {
   const rag = trace.genAi.rag;
   const stepCount = trace.genAi.timeline.length || trace.genAi.spans.length;
   const [tab, setTab] = useState<GenAiTab>(conversation.length > 0 ? "messages" : "steps");
+  const [requestFocusSpanId, setRequestFocusSpanId] = useState<string | undefined>(undefined);
+
+  const inspectRequest = (spanId: string) => {
+    setRequestFocusSpanId(spanId);
+    setTab("requests");
+  };
 
   return (
     <div className="genai-detail">
@@ -2189,11 +2196,14 @@ function GenAiDetail({ trace, onOpenInTraces, onOpenLogs }: {
       </header>
 
       <div className="tab-strip genai-tab-strip">
+        <span className="tab-group-label" title="The agent run at three granularities: conversation, execution timeline, and per-model-call wire detail">Agent run</span>
         <TabButton active={tab === "messages"} onClick={() => setTab("messages")} label="Messages" count={conversation.length} />
         <TabButton active={tab === "steps"} onClick={() => setTab("steps")} label="Steps" count={stepCount} />
         <TabButton active={tab === "requests"} onClick={() => setTab("requests")} label="Requests" count={requestCount} />
-        <TabButton active={tab === "rag"} onClick={() => setTab("rag")} label="RAG" count={rag.documents.length || rag.retrievedDocCount} />
+        <span className="tab-group-divider" aria-hidden />
+        <span className="tab-group-label" title="Derived breakdowns: projections of the Steps timeline filtered to tool calls and retrieval">Breakdowns</span>
         <TabButton active={tab === "tools"} onClick={() => setTab("tools")} label="Tools" count={toolStats.length} />
+        <TabButton active={tab === "rag"} onClick={() => setTab("rag")} label="RAG" count={rag.documents.length || rag.retrievedDocCount} />
       </div>
 
       <div className="genai-tab-content">
@@ -2204,9 +2214,9 @@ function GenAiDetail({ trace, onOpenInTraces, onOpenLogs }: {
             <MessagesView turns={conversation} trace={trace} />
           )
         ) : tab === "steps" ? (
-          <GenAiSteps trace={trace} />
+          <GenAiSteps trace={trace} onInspectRequest={inspectRequest} />
         ) : tab === "requests" ? (
-          <GenAiRequestsPanel trace={trace} />
+          <GenAiRequestsPanel trace={trace} focusSpanId={requestFocusSpanId} />
         ) : tab === "rag" ? (
           <RagPanel rag={rag} />
         ) : (
@@ -2280,6 +2290,7 @@ function derivePrimaryModel(trace: TraceDetail): { model?: string; provider?: st
 
 interface StepRow {
   spanId: string;
+  parentSpanId?: string | undefined;
   kind: string;
   label: string;
   startMs: number;
@@ -2304,6 +2315,7 @@ function buildGenAiSteps(trace: TraceDetail): StepRow[] {
     return trace.genAi.timeline
       .map<StepRow>((t) => ({
         spanId: t.spanId,
+        parentSpanId: t.parentSpanId,
         kind: t.kind,
         label: t.label,
         startMs: Number(t.startTimeUnixNano) / 1_000_000,
@@ -2326,6 +2338,7 @@ function buildGenAiSteps(trace: TraceDetail): StepRow[] {
   }
   return trace.genAi.spans.map<StepRow>((s) => ({
     spanId: s.spanId,
+    parentSpanId: s.parentSpanId,
     kind: s.kind,
     label: s.model ?? s.toolName ?? s.name,
     startMs: 0,
@@ -2346,53 +2359,143 @@ function buildGenAiSteps(trace: TraceDetail): StepRow[] {
   }));
 }
 
-function GenAiSteps({ trace }: { trace: TraceDetail }) {
+type StepCategory = "llm" | "tool" | "retrieval" | "agent" | "other";
+type StepFilter = "all" | "llm" | "tool" | "retrieval";
+
+function stepCategory(kind: string): StepCategory {
+  const k = (kind || "").toLowerCase();
+  if (k.includes("tool") || k.includes("mcp")) return "tool";
+  if (k.includes("retriev") || k.includes("rag") || k.includes("embed") || k.includes("rerank") || k.includes("search")) return "retrieval";
+  if (k.includes("chat") || k.includes("completion") || k.includes("llm") || k.includes("text_generation")) return "llm";
+  if (k.includes("agent") || k.includes("plan")) return "agent";
+  return "other";
+}
+
+function annotateStepDepth(steps: StepRow[]): Array<StepRow & { depth: number }> {
+  const ids = new Set(steps.map((step) => step.spanId));
+  const byId = new Map(steps.map((step) => [step.spanId, step]));
+  const cache = new Map<string, number>();
+  const depthOf = (step: StepRow): number => {
+    const cached = cache.get(step.spanId);
+    if (cached !== undefined) return cached;
+    let depth = 0;
+    let current = step.parentSpanId;
+    const guard = new Set<string>([step.spanId]);
+    while (current && ids.has(current) && !guard.has(current)) {
+      depth += 1;
+      guard.add(current);
+      current = byId.get(current)?.parentSpanId;
+    }
+    cache.set(step.spanId, depth);
+    return depth;
+  };
+  return steps.map((step) => ({ ...step, depth: depthOf(step) }));
+}
+
+function GenAiSteps({ trace, onInspectRequest }: { trace: TraceDetail; onInspectRequest?: (spanId: string) => void }) {
   const steps = useMemo(() => buildGenAiSteps(trace), [trace]);
+  const requestSpanIds = useMemo(() => new Set(trace.genAi.requests.map((request) => request.primarySpanId)), [trace.genAi.requests]);
+  const annotated = useMemo(() => annotateStepDepth(steps), [steps]);
+  const [filter, setFilter] = useState<StepFilter>("all");
+
+  const counts = useMemo(() => {
+    const result = { all: annotated.length, llm: 0, tool: 0, retrieval: 0 };
+    for (const step of annotated) {
+      const category = stepCategory(step.kind);
+      if (category === "llm") result.llm += 1;
+      else if (category === "tool") result.tool += 1;
+      else if (category === "retrieval") result.retrieval += 1;
+    }
+    return result;
+  }, [annotated]);
+
+  const visible = useMemo(() => {
+    if (filter === "all") return annotated;
+    return annotated.filter((step) => stepCategory(step.kind) === filter).map((step) => ({ ...step, depth: 0 }));
+  }, [annotated, filter]);
+
   if (steps.length === 0) {
     return <InlineEmpty icon={Sparkles} message="No GenAI steps captured for this trace." />;
   }
+
   const min = steps[0]!.startMs;
   const end = steps.reduce((m, s) => Math.max(m, s.startMs + s.durationMs), min);
   const span = Math.max(1, end - min);
+
+  const chips: Array<{ id: StepFilter; label: string; count: number }> = [
+    { id: "all", label: "All", count: counts.all },
+    { id: "llm", label: "LLM", count: counts.llm },
+    { id: "tool", label: "Tools", count: counts.tool },
+    { id: "retrieval", label: "Retrieval", count: counts.retrieval }
+  ];
+
   return (
-    <div className="genai-steps">
-      {steps.map((step, index) => {
-        const meta = stepKindMeta(step.kind);
-        const left = ((step.startMs - min) / span) * 100;
-        const width = Math.max(1.2, (step.durationMs / span) * 100);
-        return (
-          <div className={step.status === "error" ? "genai-step error" : "genai-step"} key={`${step.spanId}-${index}`}>
-            <span className="genai-step-index">{index + 1}</span>
-            <span className={`genai-step-icon kind-${meta.tone}`} aria-hidden>
-              <meta.icon size={13} />
-            </span>
-            <div className="genai-step-body">
-              <div className="genai-step-title">
-                <strong>{step.label || step.kind}</strong>
-                <code className={`genai-step-kind kind-${meta.tone}`}>{step.kind}</code>
-                {step.toolName && step.toolName !== step.label ? <span className="muted">· {step.toolName}</span> : null}
-                {step.status === "error" ? <AlertTriangle size={11} className="span-error-icon" /> : null}
-              </div>
-              <div className="genai-step-track" aria-hidden>
-                <span className={`genai-step-bar kind-${meta.tone}${step.status === "error" ? " error" : ""}`} style={{ left: `${left}%`, width: `${width}%` }} />
-              </div>
-              <div className="genai-step-meta">
-                <span><Timer size={10} /> {formatDuration(step.durationNano)}</span>
-                {(step.inputTokens || step.outputTokens) ? (
-                  <span>{(step.inputTokens ?? 0).toLocaleString()} in / {(step.outputTokens ?? 0).toLocaleString()} out</span>
-                ) : null}
-                {step.reasoningTokens ? <span>{step.reasoningTokens.toLocaleString()} reasoning</span> : null}
-                {step.cacheReadInputTokens ? <span>{step.cacheReadInputTokens.toLocaleString()} cache read</span> : null}
-                {step.cacheCreationInputTokens ? <span>{step.cacheCreationInputTokens.toLocaleString()} cache create</span> : null}
-                {step.finishReason ? <span>finish {step.finishReason}</span> : null}
-                {step.providerMetadataPreview ? <span title={step.providerMetadataPreview}>provider metadata</span> : null}
-                {step.model && step.model !== step.label ? <span>{step.model}</span> : null}
-                {step.provider ? <span className="muted">{step.provider}</span> : null}
+    <div className="genai-steps-wrap">
+      <div className="step-filter-bar" role="tablist" aria-label="Filter steps by kind">
+        {chips.map((chip) => (
+          <button
+            key={chip.id}
+            type="button"
+            role="tab"
+            aria-selected={filter === chip.id}
+            className={filter === chip.id ? "step-filter-chip active" : "step-filter-chip"}
+            onClick={() => setFilter(chip.id)}
+            disabled={chip.count === 0 && chip.id !== "all"}
+          >
+            <span>{chip.label}</span>
+            <span className="tab-count">{chip.count}</span>
+          </button>
+        ))}
+      </div>
+      <div className="genai-steps">
+        {visible.map((step, index) => {
+          const meta = stepKindMeta(step.kind);
+          const left = ((step.startMs - min) / span) * 100;
+          const width = Math.max(1.2, (step.durationMs / span) * 100);
+          const isRequest = requestSpanIds.has(step.spanId);
+          return (
+            <div
+              className={step.status === "error" ? "genai-step error" : "genai-step"}
+              key={`${step.spanId}-${index}`}
+              style={{ marginLeft: `${Math.min(step.depth, 4) * 18}px` }}
+            >
+              <span className="genai-step-index">{index + 1}</span>
+              <span className={`genai-step-icon kind-${meta.tone}`} aria-hidden>
+                <meta.icon size={13} />
+              </span>
+              <div className="genai-step-body">
+                <div className="genai-step-title">
+                  <strong>{step.label || step.kind}</strong>
+                  <code className={`genai-step-kind kind-${meta.tone}`}>{step.kind}</code>
+                  {step.toolName && step.toolName !== step.label ? <span className="muted">· {step.toolName}</span> : null}
+                  {step.status === "error" ? <AlertTriangle size={11} className="span-error-icon" /> : null}
+                  {isRequest && onInspectRequest ? (
+                    <button type="button" className="genai-step-inspect" onClick={() => onInspectRequest(step.spanId)} title="Open this model call in the Requests inspector">
+                      Inspect request <ArrowRight size={10} />
+                    </button>
+                  ) : null}
+                </div>
+                <div className="genai-step-track" aria-hidden>
+                  <span className={`genai-step-bar kind-${meta.tone}${step.status === "error" ? " error" : ""}`} style={{ left: `${left}%`, width: `${width}%` }} />
+                </div>
+                <div className="genai-step-meta">
+                  <span><Timer size={10} /> {formatDuration(step.durationNano)}</span>
+                  {(step.inputTokens || step.outputTokens) ? (
+                    <span>{(step.inputTokens ?? 0).toLocaleString()} in / {(step.outputTokens ?? 0).toLocaleString()} out</span>
+                  ) : null}
+                  {step.reasoningTokens ? <span>{step.reasoningTokens.toLocaleString()} reasoning</span> : null}
+                  {step.cacheReadInputTokens ? <span>{step.cacheReadInputTokens.toLocaleString()} cache read</span> : null}
+                  {step.cacheCreationInputTokens ? <span>{step.cacheCreationInputTokens.toLocaleString()} cache create</span> : null}
+                  {step.finishReason ? <span>finish {step.finishReason}</span> : null}
+                  {step.providerMetadataPreview ? <span title={step.providerMetadataPreview}>provider metadata</span> : null}
+                  {step.model && step.model !== step.label ? <span>{step.model}</span> : null}
+                  {step.provider ? <span className="muted">{step.provider}</span> : null}
+                </div>
               </div>
             </div>
-          </div>
-        );
-      })}
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -2411,10 +2514,17 @@ function stepKindMeta(kind: string): { icon: typeof Bot; tone: string } {
 type GenAiRequest = TraceDetail["genAi"]["requests"][number];
 type GenAiRequestTab = "overview" | "flow" | "messages" | "tools" | "response" | "wire";
 
-function GenAiRequestsPanel({ trace }: { trace: TraceDetail }) {
+function GenAiRequestsPanel({ trace, focusSpanId }: { trace: TraceDetail; focusSpanId?: string | undefined }) {
   const requests = trace.genAi.requests;
   const [selectedId, setSelectedId] = useState(requests[0]?.id ?? "");
   const [tab, setTab] = useState<GenAiRequestTab>("overview");
+
+  useEffect(() => {
+    if (!focusSpanId) return;
+    const match = requests.find((request) => request.primarySpanId === focusSpanId);
+    if (match) setSelectedId(match.id);
+  }, [focusSpanId, requests]);
+
   const selected = requests.find((request) => request.id === selectedId) ?? requests[0];
   const primarySpan = selected ? trace.spans.find((span) => span.spanId === selected.primarySpanId) : undefined;
 
@@ -2460,7 +2570,7 @@ function GenAiRequestsPanel({ trace }: { trace: TraceDetail }) {
           <TabButton active={tab === "overview"} onClick={() => setTab("overview")} label="Overview" count={selected.relatedSpanIds.length} />
           <TabButton active={tab === "flow"} onClick={() => setTab("flow")} label="Flow" count={selected.messages.length} />
           <TabButton active={tab === "messages"} onClick={() => setTab("messages")} label="Messages" count={selected.messages.length} />
-          <TabButton active={tab === "tools"} onClick={() => setTab("tools")} label="Tools" count={selected.offeredTools.length} />
+          <TabButton active={tab === "tools"} onClick={() => setTab("tools")} label="Offered" count={selected.offeredTools.length} />
           <TabButton active={tab === "response"} onClick={() => setTab("response")} label="Response" count={selected.finishReason ? 1 : 0} />
           <TabButton active={tab === "wire"} onClick={() => setTab("wire")} label="Wire" count={primarySpan ? Object.keys(primarySpan.attributes).length : 0} />
         </div>
@@ -2613,22 +2723,43 @@ function RagPanel({ rag }: { rag: TraceDetail["genAi"]["rag"] }) {
   );
 }
 
+interface ToolCall {
+  spanId: string;
+  startMs: number;
+  durationNano: number;
+  error: boolean;
+  argsPreview?: string | undefined;
+  resultPreview?: string | undefined;
+}
+
 interface ToolStat {
   toolName: string;
   count: number;
   failed: number;
   totalDurationNano: number;
+  calls: ToolCall[];
 }
 
 function aggregateToolStats(trace: TraceDetail): ToolStat[] {
   const map = new Map<string, ToolStat>();
   for (const span of trace.genAi.spans) {
     if (!span.toolName) continue;
-    const entry = map.get(span.toolName) ?? { toolName: span.toolName, count: 0, failed: 0, totalDurationNano: 0 };
+    const entry = map.get(span.toolName) ?? { toolName: span.toolName, count: 0, failed: 0, totalDurationNano: 0, calls: [] };
     entry.count += 1;
     if (span.error) entry.failed += 1;
     entry.totalDurationNano += span.durationNano ?? 0;
+    entry.calls.push({
+      spanId: span.spanId,
+      startMs: span.startTimeUnixNano ? Number(span.startTimeUnixNano) / 1_000_000 : 0,
+      durationNano: span.durationNano ?? 0,
+      error: Boolean(span.error),
+      argsPreview: span.toolCallArgsPreview,
+      resultPreview: span.toolCallResultPreview
+    });
     map.set(span.toolName, entry);
+  }
+  for (const entry of map.values()) {
+    entry.calls.sort((a, b) => a.startMs - b.startMs);
   }
   return Array.from(map.values()).sort((a, b) => b.count - a.count);
 }
@@ -2640,27 +2771,65 @@ function ToolsPanel({ stats }: { stats: ToolStat[] }) {
   const maxCount = Math.max(1, ...stats.map((s) => s.count));
   return (
     <div className="tools-panel">
-      {stats.map((stat) => {
-        const portion = stat.count / maxCount;
-        const avg = stat.totalDurationNano / Math.max(1, stat.count);
-        return (
-          <div className={stat.failed > 0 ? "tool-row has-failed" : "tool-row"} key={stat.toolName}>
-            <div className="tool-row-head">
-              <Wrench size={12} />
-              <strong>{stat.toolName}</strong>
-              <span className="muted">avg {formatDuration(avg)}</span>
-            </div>
-            <div className="tool-row-bar" aria-hidden>
-              <span className="tool-row-fill" style={{ width: `${Math.max(4, portion * 100)}%` }} />
-            </div>
-            <div className="tool-row-meta">
-              <span><strong>{stat.count}</strong> call{stat.count === 1 ? "" : "s"}</span>
-              {stat.failed > 0 ? <span className="tool-row-failed"><AlertTriangle size={10} /> {stat.failed} failed</span> : <span className="muted">all ok</span>}
-              <span className="muted">total {formatDuration(stat.totalDurationNano)}</span>
-            </div>
-          </div>
-        );
-      })}
+      {stats.map((stat) => (
+        <ToolStatRow key={stat.toolName} stat={stat} maxCount={maxCount} />
+      ))}
+    </div>
+  );
+}
+
+function ToolStatRow({ stat, maxCount }: { stat: ToolStat; maxCount: number }) {
+  const [open, setOpen] = useState(false);
+  const portion = stat.count / maxCount;
+  const avg = stat.totalDurationNano / Math.max(1, stat.count);
+  const hasDetail = stat.calls.some((call) => call.argsPreview || call.resultPreview) || stat.calls.length > 0;
+  return (
+    <div className={stat.failed > 0 ? "tool-row has-failed" : "tool-row"}>
+      <button
+        type="button"
+        className="tool-row-toggle"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+        disabled={!hasDetail}
+      >
+        <div className="tool-row-head">
+          {hasDetail ? (open ? <ChevronDown size={12} /> : <ChevronRight size={12} />) : <Wrench size={12} />}
+          <strong>{stat.toolName}</strong>
+          <span className="muted">avg {formatDuration(avg)}</span>
+        </div>
+        <div className="tool-row-bar" aria-hidden>
+          <span className="tool-row-fill" style={{ width: `${Math.max(4, portion * 100)}%` }} />
+        </div>
+        <div className="tool-row-meta">
+          <span><strong>{stat.count}</strong> call{stat.count === 1 ? "" : "s"}</span>
+          {stat.failed > 0 ? <span className="tool-row-failed"><AlertTriangle size={10} /> {stat.failed} failed</span> : <span className="muted">all ok</span>}
+          <span className="muted">total {formatDuration(stat.totalDurationNano)}</span>
+        </div>
+      </button>
+      {open ? (
+        <div className="tool-call-list">
+          {stat.calls.map((call, index) => (
+            <article className={call.error ? "tool-call-card error" : "tool-call-card"} key={`${call.spanId}-${index}`}>
+              <header className="tool-call-head">
+                <span className="tool-call-index">#{index + 1}</span>
+                <span className={call.error ? "request-status error" : "request-status"}>{call.error ? "error" : "ok"}</span>
+                <span className="muted"><Timer size={10} /> {formatDuration(call.durationNano)}</span>
+                <CopyableCode value={call.spanId} display={shortId(call.spanId)} copyLabel="Copy tool span ID" className="tool-call-span-id" />
+              </header>
+              <div className="tool-call-io">
+                <div className="tool-call-io-block">
+                  <span className="tool-call-io-label">Arguments</span>
+                  {call.argsPreview ? <pre>{call.argsPreview}</pre> : <p className="muted">No arguments captured.</p>}
+                </div>
+                <div className="tool-call-io-block">
+                  <span className="tool-call-io-label">Result</span>
+                  {call.resultPreview ? <pre>{call.resultPreview}</pre> : <p className="muted">No result captured.</p>}
+                </div>
+              </div>
+            </article>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }

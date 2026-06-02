@@ -2915,6 +2915,26 @@ h1, h2, h3, h4 {
 .genai-tab-strip {
   padding: 0 14px;
   border-bottom: 1px solid var(--color-border-soft);
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.tab-group-label {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  opacity: 0.7;
+  padding: 0 4px 0 0;
+  user-select: none;
+}
+
+.tab-group-divider {
+  width: 1px;
+  align-self: stretch;
+  margin: 6px 10px;
+  background: var(--color-border);
 }
 
 .genai-tab-content {
@@ -2926,10 +2946,76 @@ h1, h2, h3, h4 {
 
 /* Steps */
 
+.genai-steps-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.step-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.step-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--color-border);
+  background: var(--color-panel);
+  color: var(--color-text-muted);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.step-filter-chip:hover:not(:disabled) {
+  color: var(--color-text);
+  border-color: var(--color-border-strong, var(--color-border));
+}
+
+.step-filter-chip.active {
+  background: var(--color-accent-soft);
+  color: var(--color-accent-strong);
+  border-color: var(--color-accent);
+}
+
+.step-filter-chip.active .tab-count {
+  background: var(--color-accent);
+  color: #fff;
+}
+
+.step-filter-chip:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 .genai-steps {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.genai-step-inspect {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: auto;
+  border: 1px solid var(--color-accent);
+  background: var(--color-accent-soft);
+  color: var(--color-accent-strong);
+  border-radius: 6px;
+  padding: 2px 7px;
+  font-size: 10.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.genai-step-inspect:hover {
+  background: var(--color-accent);
+  color: #fff;
 }
 
 .genai-step {
@@ -3489,6 +3575,120 @@ h1, h2, h3, h4 {
   gap: 4px;
   color: var(--color-error);
   font-weight: 600;
+}
+
+.tool-row-toggle {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+}
+
+.tool-row-toggle:disabled {
+  cursor: default;
+}
+
+.tool-row-toggle .tool-row-head svg:first-child {
+  color: var(--color-text-muted);
+  flex: none;
+}
+
+.tool-call-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--color-border);
+}
+
+.tool-call-card {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-panel);
+  padding: 8px 10px;
+}
+
+.tool-call-card.error {
+  border-color: var(--color-error-border);
+  background: var(--color-error-soft);
+}
+
+.tool-call-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--color-text-muted);
+  margin-bottom: 8px;
+}
+
+.tool-call-head .muted {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.tool-call-index {
+  font-weight: 600;
+  color: var(--color-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.tool-call-span-id {
+  margin-left: auto;
+}
+
+.tool-call-io {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+@media (max-width: 720px) {
+  .tool-call-io {
+    grid-template-columns: 1fr;
+  }
+}
+
+.tool-call-io-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.tool-call-io-label {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted);
+  font-weight: 600;
+}
+
+.tool-call-io-block pre {
+  margin: 0;
+  padding: 8px;
+  background: var(--color-code-bg, var(--color-panel-hover));
+  border-radius: 6px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow: auto;
+}
+
+.tool-call-io-block p {
+  margin: 0;
+  font-size: 12px;
 }
 
 /* ----------------------------------------------------------
