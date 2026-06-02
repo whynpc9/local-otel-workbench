@@ -29,6 +29,7 @@ import {
   MessageSquareCode,
   Monitor,
   Moon,
+  Menu,
   PanelsTopLeft,
   Pause,
   Play,
@@ -381,9 +382,31 @@ export function App() {
 
   const pageMeta = currentPageMeta(activePage);
   const showTraceDetail = activePage === "Traces" && Boolean(selectedTraceId);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  useEffect(() => {
+    setSidebarOpen(false);
+  }, [activePage]);
+
+  useEffect(() => {
+    if (!sidebarOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSidebarOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [sidebarOpen]);
 
   return (
-    <div className="app-shell">
+    <div className={sidebarOpen ? "app-shell sidebar-open" : "app-shell"}>
+      {sidebarOpen ? (
+        <button
+          type="button"
+          className="sidebar-backdrop"
+          aria-label="Close navigation"
+          onClick={() => setSidebarOpen(false)}
+        />
+      ) : null}
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-mark">
@@ -393,6 +416,14 @@ export function App() {
             <strong>OTel Workbench</strong>
             <span>local telemetry</span>
           </div>
+          <button
+            type="button"
+            className="sidebar-close"
+            onClick={() => setSidebarOpen(false)}
+            aria-label="Close navigation"
+          >
+            <X size={16} />
+          </button>
         </div>
         <nav className="nav-list" aria-label="Primary">
           {nav.map((item) => (
@@ -402,6 +433,7 @@ export function App() {
               onClick={() => {
                 setActivePage(item.id);
                 setSelectedTraceId("");
+                setSidebarOpen(false);
               }}
               title={item.hint}
             >
@@ -426,6 +458,15 @@ export function App() {
       <main className="workspace">
         <header className={!showTraceDetail && activePage !== "Settings" && activePage !== "Resources" ? "page-header page-header-has-filters" : "page-header"}>
           <div className="page-title-group">
+            <button
+              type="button"
+              className="sidebar-toggle"
+              onClick={() => setSidebarOpen(true)}
+              aria-label="Open navigation"
+              aria-expanded={sidebarOpen}
+            >
+              <Menu size={18} />
+            </button>
             {showTraceDetail ? (
               <button className="back-button" onClick={() => setSelectedTraceId("")} title="Back to traces">
                 <ArrowLeft size={14} />
@@ -1548,7 +1589,97 @@ function SpanDetails({ trace, selectedSpanId, genAiSpanIds }: { trace: TraceDeta
   );
 }
 
-function MessagesView({ turns, trace }: { turns: ConversationTurn[]; trace?: TraceDetail }) {
+function truncateText(text: string, max = 140): string {
+  const oneLine = text.replace(/\s+/g, " ").trim();
+  if (oneLine.length <= max) return oneLine;
+  return `${oneLine.slice(0, max - 1)}…`;
+}
+
+function flowMessageRoleShort(turn: ConversationTurn, meta: ReturnType<typeof messageRoleMeta>): string {
+  if (turn.kind === "tool-call") return "tool call";
+  if (turn.kind === "tool-result") return "tool result";
+  return meta.label.toLowerCase();
+}
+
+function FlowMessageRow({ turn }: { turn: ConversationTurn }) {
+  const [open, setOpen] = useState(false);
+  const meta = messageRoleMeta(turn);
+  const role = flowMessageRoleShort(turn, meta);
+  const content = turn.contentPreview || turn.reasoningPreview || "";
+  const hasContent = content.length > 0;
+  const isToolPayload = turn.kind === "tool-call" || turn.kind === "tool-result";
+  const reasoning = turn.reasoningPreview ?? "";
+
+  return (
+    <div className={`flow-message-row tone-${meta.tone}${open ? " open" : ""}`}>
+      <button
+        type="button"
+        className="flow-message-head"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+      >
+        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        <span className={`flow-message-role tone-${meta.tone}`}>{role}</span>
+        {!open ? (
+          <span className="flow-message-preview">{hasContent ? truncateText(content) : "No content captured."}</span>
+        ) : null}
+      </button>
+      {open ? (
+        <div className="flow-message-body">
+          {hasContent ? (
+            isToolPayload ? (
+              <pre className="flow-message-tool-payload">{content}</pre>
+            ) : content.startsWith("[redacted") ? (
+              <p className="message-redacted">{content}</p>
+            ) : (
+              <div className="message-preview">{renderMessagePreview(turn)}</div>
+            )
+          ) : (
+            <p className="message-empty muted">No content captured.</p>
+          )}
+          {reasoning && turn.contentPreview ? (
+            <details className="flow-message-reasoning">
+              <summary>Reasoning</summary>
+              <pre>{reasoning}</pre>
+            </details>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function FlowMessageList({ turns }: { turns: ConversationTurn[] }) {
+  return (
+    <div className="flow-message-list">
+      {turns.map((turn, index) => (
+        <FlowMessageRow key={`${turn.spanId}-${index}-${turn.kind}-${turn.role}`} turn={turn} />
+      ))}
+    </div>
+  );
+}
+
+type MessageRoundGroup = {
+  label?: string | undefined;
+  spanId?: string | undefined;
+  turns: ConversationTurn[];
+};
+
+type MessageStepGroup = {
+  label?: string | undefined;
+  rounds: MessageRoundGroup[];
+};
+
+function messageStepGroupKey(label: string, groupIndex: number): string {
+  return `${label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}-${groupIndex}`;
+}
+
+function messageStepNavShortLabel(label: string): string {
+  const word = label.split(/\s+/)[0] ?? label;
+  return word.length > 8 ? `${word.slice(0, 7)}…` : word;
+}
+
+function MessagesView({ turns, trace, compact = false }: { turns: ConversationTurn[]; trace?: TraceDetail; compact?: boolean }) {
   const groups = useMemo(() => {
     if (!trace) {
       return [{ label: undefined, rounds: [{ label: undefined, spanId: undefined, turns }] }];
@@ -1556,18 +1687,79 @@ function MessagesView({ turns, trace }: { turns: ConversationTurn[]; trace?: Tra
     return groupConversationTurns(trace, turns);
   }, [trace, turns]);
 
-  return (
-    <div className="message-list">
-      {groups.map((group, groupIndex) => (
-        <section className="message-group" key={`${group.label ?? "group"}-${groupIndex}`}>
-          {group.label ? (
-            <header className="message-group-header">
-              <Sparkles size={12} />
-              <strong>{group.label}</strong>
-              <span className="muted">{group.rounds.length} inference round{group.rounds.length === 1 ? "" : "s"}</span>
-            </header>
-          ) : null}
-          {group.rounds.map((round, roundIndex) => (
+  const labeledGroupKeys = useMemo(
+    () => groups.flatMap((group, groupIndex) => (group.label ? [messageStepGroupKey(group.label, groupIndex)] : [])),
+    [groups]
+  );
+  const showStepNav = labeledGroupKeys.length >= 2;
+  const shellRef = useRef<HTMLDivElement | null>(null);
+  const sectionRefs = useRef(new Map<string, HTMLElement>());
+  const [activeStepKey, setActiveStepKey] = useState<string | undefined>(labeledGroupKeys[0]);
+
+  useEffect(() => {
+    setActiveStepKey(labeledGroupKeys[0]);
+  }, [labeledGroupKeys]);
+
+  const registerSection = useCallback((key: string) => (element: HTMLElement | null) => {
+    if (element) sectionRefs.current.set(key, element);
+    else sectionRefs.current.delete(key);
+  }, []);
+
+  useEffect(() => {
+    if (!showStepNav) return;
+    const scrollRoot = shellRef.current?.closest(".genai-tab-content, .tab-content") as HTMLElement | null;
+    const observed = labeledGroupKeys
+      .map((key) => sectionRefs.current.get(key))
+      .filter((element): element is HTMLElement => Boolean(element));
+    if (observed.length === 0) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries
+          .filter((entry) => entry.isIntersecting)
+          .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top);
+        const top = visible[0]?.target.getAttribute("data-step-key");
+        if (top) setActiveStepKey(top);
+      },
+      { root: scrollRoot, rootMargin: "-12% 0px -68% 0px", threshold: 0 }
+    );
+
+    for (const element of observed) observer.observe(element);
+    return () => observer.disconnect();
+  }, [showStepNav, labeledGroupKeys, groups]);
+
+  const jumpToStep = (key: string) => {
+    sectionRefs.current.get(key)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    setActiveStepKey(key);
+  };
+
+  const renderGroup = (group: MessageStepGroup, groupIndex: number, mode: "compact" | "full") => {
+    const stepKey = group.label ? messageStepGroupKey(group.label, groupIndex) : undefined;
+    return (
+      <section
+        className={mode === "compact" ? "message-group message-group-compact" : "message-group"}
+        key={`${group.label ?? "group"}-${groupIndex}`}
+        id={stepKey ? `message-step-${stepKey}` : undefined}
+        data-step-key={stepKey}
+        ref={stepKey ? registerSection(stepKey) : undefined}
+      >
+        {group.label ? (
+          <header className={mode === "compact" ? "message-group-header-compact" : "message-group-header"}>
+            <Sparkles size={12} />
+            <strong>{group.label}</strong>
+            <span className="muted">{group.rounds.length} inference round{group.rounds.length === 1 ? "" : "s"}</span>
+          </header>
+        ) : null}
+        {mode === "compact" ? (
+          <div className="flow-message-list">
+            {group.rounds.flatMap((round, roundIndex) =>
+              round.turns.map((turn, index) => (
+                <FlowMessageRow key={`${round.spanId ?? "round"}-${roundIndex}-${turn.spanId}-${index}-${turn.kind}-${turn.role}`} turn={turn} />
+              ))
+            )}
+          </div>
+        ) : (
+          group.rounds.map((round, roundIndex) => (
             <div className="message-round" key={`${round.spanId ?? "round"}-${roundIndex}`}>
               {round.label ? (
                 <div className="message-round-label">
@@ -1585,23 +1777,43 @@ function MessagesView({ turns, trace }: { turns: ConversationTurn[]; trace?: Tra
                 ))}
               </div>
             </div>
-          ))}
-        </section>
-      ))}
+          ))
+        )}
+      </section>
+    );
+  };
+
+  const listClassName = compact ? "message-list message-list-compact" : "message-list";
+
+  return (
+    <div ref={shellRef} className={showStepNav ? "message-list-shell has-step-nav" : "message-list-shell"}>
+      {showStepNav ? (
+        <nav className="message-step-nav" aria-label="Jump to agent step">
+          {groups.map((group, groupIndex) => {
+            if (!group.label) return null;
+            const stepKey = messageStepGroupKey(group.label, groupIndex);
+            return (
+              <button
+                key={stepKey}
+                type="button"
+                className={activeStepKey === stepKey ? "message-step-nav-item active" : "message-step-nav-item"}
+                onClick={() => jumpToStep(stepKey)}
+                title={`${group.label} · ${group.rounds.length} inference round${group.rounds.length === 1 ? "" : "s"}`}
+                aria-current={activeStepKey === stepKey ? "location" : undefined}
+              >
+                <span className="message-step-nav-marker" aria-hidden />
+                <span className="message-step-nav-label">{messageStepNavShortLabel(group.label)}</span>
+              </button>
+            );
+          })}
+        </nav>
+      ) : null}
+      <div className={listClassName}>
+        {groups.map((group, groupIndex) => renderGroup(group, groupIndex, compact ? "compact" : "full"))}
+      </div>
     </div>
   );
 }
-
-type MessageRoundGroup = {
-  label?: string | undefined;
-  spanId?: string | undefined;
-  turns: ConversationTurn[];
-};
-
-type MessageStepGroup = {
-  label?: string | undefined;
-  rounds: MessageRoundGroup[];
-};
 
 function groupConversationTurns(trace: TraceDetail, turns: ConversationTurn[]): MessageStepGroup[] {
   const spanById = new Map(trace.spans.map((span) => [span.spanId, span]));
@@ -2112,7 +2324,7 @@ function GenAiDetail({ trace, onOpenInTraces, onOpenLogs }: {
   return (
     <div className="genai-detail">
       <header className="genai-detail-header">
-        <div className="genai-detail-main">
+        <div className="genai-detail-top">
           <div className="genai-detail-title">
             <span className="genai-detail-icon">
               <Sparkles size={14} className="genai-star" />
@@ -2139,59 +2351,59 @@ function GenAiDetail({ trace, onOpenInTraces, onOpenLogs }: {
               </div>
             </div>
           </div>
-          <div className="genai-mini-stats" aria-label="Trace statistics">
-            <GenAiMiniStat
-              label="Tokens"
-              value={formatOptionalCount(trace.genAi.totalTokens)}
-              title={`${(trace.genAi.inputTokens ?? 0).toLocaleString()} in · ${(trace.genAi.outputTokens ?? 0).toLocaleString()} out`}
-            />
-            <GenAiMiniStat
-              label="Cache"
-              value={formatOptionalCount(trace.genAi.cacheReadInputTokens)}
-              title={trace.genAi.cacheReadInputTokens === undefined ? "No cache read token data captured" : "Cache read input tokens"}
-            />
-            <GenAiMiniStat
-              label="Reasoning"
-              value={formatOptionalCount(trace.genAi.reasoningTokens)}
-              title={trace.genAi.reasoningTokens === undefined ? "No reasoning token data captured" : "Reasoning tokens"}
-            />
-            <GenAiMiniStat
-              label="Finish"
-              value={formatFinishReasonValue(trace.genAi.finishReasons)}
-              title={trace.genAi.finishReasons.length ? trace.genAi.finishReasons.join(", ") : "No finish reason captured"}
-            />
-            <GenAiMiniStat
-              label="Cost"
-              value={trace.genAi.estimatedCostUsd === undefined ? "—" : `$${trace.genAi.estimatedCostUsd.toFixed(5)}`}
-              title={trace.genAi.estimatedCostUsd === undefined ? "No pricing configured" : "Estimated cost"}
-            />
-            <GenAiMiniStat
-              label="Tools"
-              value={trace.genAi.toolCallCount.toLocaleString()}
-              title={trace.genAi.failedToolCallCount ? `${trace.genAi.failedToolCallCount} failed` : "All tool calls succeeded"}
-              tone={trace.genAi.failedToolCallCount ? "warn" : undefined}
-            />
-            <GenAiMiniStat
-              label="Retrieval"
-              value={rag.retrievedDocCount.toLocaleString()}
-              title={`${rag.retrievalSpanCount} retr · ${rag.embeddingSpanCount} embed${rag.rerankSpanCount ? ` · ${rag.rerankSpanCount} rerank` : ""}`}
-            />
-            <GenAiMiniStat
-              label="Metadata"
-              value={formatOptionalCount(trace.genAi.providerMetadataCount)}
-              title={trace.genAi.providerMetadataCount ? "Provider metadata captured on GenAI spans" : "No provider metadata captured"}
-            />
+          <div className="genai-detail-actions">
+            <button type="button" className="outline-button" onClick={() => onOpenLogs(trace.traceId)} title="View correlated logs">
+              <FileText size={12} />
+              <span>Logs</span>
+            </button>
+            <button type="button" className="outline-button" onClick={() => onOpenInTraces(trace.traceId)} title="Open trace waterfall">
+              <GitBranch size={12} />
+              <span>Open in Traces</span>
+            </button>
           </div>
         </div>
-        <div className="genai-detail-actions">
-          <button type="button" className="outline-button" onClick={() => onOpenLogs(trace.traceId)} title="View correlated logs">
-            <FileText size={12} />
-            <span>Logs</span>
-          </button>
-          <button type="button" className="outline-button" onClick={() => onOpenInTraces(trace.traceId)} title="Open trace waterfall">
-            <GitBranch size={12} />
-            <span>Open in Traces</span>
-          </button>
+        <div className="genai-stat-grid" aria-label="Trace statistics">
+          <GenAiMiniStat
+            label="Tokens"
+            value={formatOptionalCount(trace.genAi.totalTokens)}
+            title={`${(trace.genAi.inputTokens ?? 0).toLocaleString()} in · ${(trace.genAi.outputTokens ?? 0).toLocaleString()} out`}
+          />
+          <GenAiMiniStat
+            label="Cache"
+            value={formatOptionalCount(trace.genAi.cacheReadInputTokens)}
+            title={trace.genAi.cacheReadInputTokens === undefined ? "No cache read token data captured" : "Cache read input tokens"}
+          />
+          <GenAiMiniStat
+            label="Reasoning"
+            value={formatOptionalCount(trace.genAi.reasoningTokens)}
+            title={trace.genAi.reasoningTokens === undefined ? "No reasoning token data captured" : "Reasoning tokens"}
+          />
+          <GenAiMiniStat
+            label="Cost"
+            value={trace.genAi.estimatedCostUsd === undefined ? "—" : `$${trace.genAi.estimatedCostUsd.toFixed(5)}`}
+            title={trace.genAi.estimatedCostUsd === undefined ? "No pricing configured" : "Estimated cost"}
+          />
+          <GenAiMiniStat
+            label="Tools"
+            value={trace.genAi.toolCallCount.toLocaleString()}
+            title={trace.genAi.failedToolCallCount ? `${trace.genAi.failedToolCallCount} failed` : "All tool calls succeeded"}
+            tone={trace.genAi.failedToolCallCount ? "warn" : undefined}
+          />
+          <GenAiMiniStat
+            label="Retrieval"
+            value={rag.retrievedDocCount.toLocaleString()}
+            title={`${rag.retrievalSpanCount} retr · ${rag.embeddingSpanCount} embed${rag.rerankSpanCount ? ` · ${rag.rerankSpanCount} rerank` : ""}`}
+          />
+          <GenAiMiniStat
+            label="Finish"
+            value={formatFinishReasonValue(trace.genAi.finishReasons)}
+            title={trace.genAi.finishReasons.length ? trace.genAi.finishReasons.join(", ") : "No finish reason captured"}
+          />
+          <GenAiMiniStat
+            label="Metadata"
+            value={formatOptionalCount(trace.genAi.providerMetadataCount)}
+            title={trace.genAi.providerMetadataCount ? "Provider metadata captured on GenAI spans" : "No provider metadata captured"}
+          />
         </div>
       </header>
 
@@ -2211,7 +2423,7 @@ function GenAiDetail({ trace, onOpenInTraces, onOpenLogs }: {
           conversation.length === 0 ? (
             <InlineEmpty icon={MessageSquareCode} message="No message content recorded. Set OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true to capture chat messages." />
           ) : (
-            <MessagesView turns={conversation} trace={trace} />
+            <MessagesView turns={conversation} trace={trace} compact />
           )
         ) : tab === "steps" ? (
           <GenAiSteps trace={trace} onInspectRequest={inspectRequest} />
@@ -2233,12 +2445,12 @@ function GenAiMiniStat({ label, value, title, tone }: {
   title?: string;
   tone?: "warn" | undefined;
 }) {
-  const cls = tone === "warn" ? "genai-mini-stat tone-warn" : "genai-mini-stat";
+  const cls = tone === "warn" ? "genai-stat-cell tone-warn" : "genai-stat-cell";
   return (
-    <span className={cls} title={title}>
-      <span className="genai-mini-stat-label">{label}</span>
-      <strong className="genai-mini-stat-value">{value}</strong>
-    </span>
+    <div className={cls} title={title}>
+      <span className="genai-stat-cell-label">{label}</span>
+      <strong className="genai-stat-cell-value">{value}</strong>
+    </div>
   );
 }
 
@@ -2392,6 +2604,105 @@ function annotateStepDepth(steps: StepRow[]): Array<StepRow & { depth: number }>
   return steps.map((step) => ({ ...step, depth: depthOf(step) }));
 }
 
+function formatStepKindLabel(kind: string): string {
+  const k = (kind || "").toLowerCase();
+  if (k.includes("tool") || k.includes("mcp")) return "TOOL";
+  if (k.includes("embed")) return "EMBED";
+  if (k.includes("rerank")) return "RERANK";
+  if (k.includes("retriev") || k.includes("rag") || k.includes("search")) return "RETRIEVAL";
+  if (k.includes("agent") || k.includes("plan")) return "AGENT";
+  if (k.includes("chat") || k.includes("completion") || k.includes("llm") || k.includes("text_generation")) return "CHAT";
+  return kind.toUpperCase().slice(0, 12);
+}
+
+function formatStepPreview(step: StepRow): string {
+  const parts: string[] = [];
+  if (step.inputTokens || step.outputTokens) {
+    parts.push(`${(step.inputTokens ?? 0).toLocaleString()} in / ${(step.outputTokens ?? 0).toLocaleString()} out`);
+  }
+  if (step.finishReason) parts.push(`finish ${step.finishReason}`);
+  if (step.toolName && step.toolName !== step.label) parts.push(step.toolName);
+  return parts.join(" · ") || step.kind;
+}
+
+function formatTimelineAxisLabels(spanMs: number): string[] {
+  const totalSec = Math.ceil(spanMs / 1000);
+  const step = totalSec <= 10 ? 2 : totalSec <= 30 ? 5 : 10;
+  const labels: string[] = [];
+  for (let t = 0; t <= totalSec; t += step) {
+    labels.push(`${t} s`);
+    if (labels.length >= 6) break;
+  }
+  return labels;
+}
+
+function StepNetworkRow({
+  step,
+  index,
+  min,
+  span,
+  meta,
+  isRequest,
+  onInspectRequest
+}: {
+  step: StepRow & { depth: number };
+  index: number;
+  min: number;
+  span: number;
+  meta: ReturnType<typeof stepKindMeta>;
+  isRequest: boolean;
+  onInspectRequest?: (spanId: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const left = ((step.startMs - min) / span) * 100;
+  const width = Math.max(0.8, (step.durationMs / span) * 100);
+  const kindLabel = formatStepKindLabel(step.kind);
+  const preview = formatStepPreview(step);
+
+  return (
+    <div className={`step-net-row${step.status === "error" ? " error" : ""}${open ? " open" : ""}`} style={{ paddingLeft: `${Math.min(step.depth, 4) * 14}px` }}>
+      <div className="step-net-main">
+        <button type="button" className="step-net-toggle" onClick={() => setOpen((value) => !value)} aria-expanded={open} aria-label={open ? "Collapse step" : "Expand step"}>
+          {open ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+        </button>
+        <span className="step-net-index">{index + 1}</span>
+        <span className={`step-net-icon kind-${meta.tone}`} aria-hidden>
+          <meta.icon size={12} />
+        </span>
+        <strong className="step-net-label">{step.label || step.kind}</strong>
+        <code className={`step-net-kind kind-${meta.tone}`}>{kindLabel}</code>
+        <span className="step-net-duration">{formatDuration(step.durationNano)}</span>
+        <span className="step-net-preview">{preview}</span>
+        <div className="step-net-track" aria-hidden>
+          <span className={`step-net-bar kind-${meta.tone}${step.status === "error" ? " error" : ""}`} style={{ left: `${left}%`, width: `${width}%` }} />
+        </div>
+      </div>
+      {open ? (
+        <div className="step-net-detail">
+          <div className="step-net-detail-meta">
+            <span><Timer size={10} /> {formatDuration(step.durationNano)}</span>
+            {(step.inputTokens || step.outputTokens) ? (
+              <span>{(step.inputTokens ?? 0).toLocaleString()} in / {(step.outputTokens ?? 0).toLocaleString()} out</span>
+            ) : null}
+            {step.reasoningTokens ? <span>{step.reasoningTokens.toLocaleString()} reasoning</span> : null}
+            {step.cacheReadInputTokens ? <span>{step.cacheReadInputTokens.toLocaleString()} cache read</span> : null}
+            {step.cacheCreationInputTokens ? <span>{step.cacheCreationInputTokens.toLocaleString()} cache create</span> : null}
+            {step.finishReason ? <span>finish {step.finishReason}</span> : null}
+            {step.providerMetadataPreview ? <span title={step.providerMetadataPreview}>provider metadata</span> : null}
+            {step.model && step.model !== step.label ? <span>{step.model}</span> : null}
+            {step.provider ? <span className="muted">{step.provider}</span> : null}
+          </div>
+          {isRequest && onInspectRequest ? (
+            <button type="button" className="genai-step-inspect" onClick={() => onInspectRequest(step.spanId)} title="Open this model call in the Requests inspector">
+              Inspect request <ArrowRight size={10} />
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function GenAiSteps({ trace, onInspectRequest }: { trace: TraceDetail; onInspectRequest?: (spanId: string) => void }) {
   const steps = useMemo(() => buildGenAiSteps(trace), [trace]);
   const requestSpanIds = useMemo(() => new Set(trace.genAi.requests.map((request) => request.primarySpanId)), [trace.genAi.requests]);
@@ -2429,6 +2740,8 @@ function GenAiSteps({ trace, onInspectRequest }: { trace: TraceDetail; onInspect
     { id: "retrieval", label: "Retrieval", count: counts.retrieval }
   ];
 
+  const axisLabels = formatTimelineAxisLabels(span);
+
   return (
     <div className="genai-steps-wrap">
       <div className="step-filter-bar" role="tablist" aria-label="Filter steps by kind">
@@ -2447,54 +2760,55 @@ function GenAiSteps({ trace, onInspectRequest }: { trace: TraceDetail; onInspect
           </button>
         ))}
       </div>
-      <div className="genai-steps">
-        {visible.map((step, index) => {
-          const meta = stepKindMeta(step.kind);
-          const left = ((step.startMs - min) / span) * 100;
-          const width = Math.max(1.2, (step.durationMs / span) * 100);
-          const isRequest = requestSpanIds.has(step.spanId);
-          return (
-            <div
-              className={step.status === "error" ? "genai-step error" : "genai-step"}
-              key={`${step.spanId}-${index}`}
-              style={{ marginLeft: `${Math.min(step.depth, 4) * 18}px` }}
-            >
-              <span className="genai-step-index">{index + 1}</span>
-              <span className={`genai-step-icon kind-${meta.tone}`} aria-hidden>
-                <meta.icon size={13} />
-              </span>
-              <div className="genai-step-body">
-                <div className="genai-step-title">
-                  <strong>{step.label || step.kind}</strong>
-                  <code className={`genai-step-kind kind-${meta.tone}`}>{step.kind}</code>
-                  {step.toolName && step.toolName !== step.label ? <span className="muted">· {step.toolName}</span> : null}
-                  {step.status === "error" ? <AlertTriangle size={11} className="span-error-icon" /> : null}
-                  {isRequest && onInspectRequest ? (
-                    <button type="button" className="genai-step-inspect" onClick={() => onInspectRequest(step.spanId)} title="Open this model call in the Requests inspector">
-                      Inspect request <ArrowRight size={10} />
-                    </button>
-                  ) : null}
-                </div>
-                <div className="genai-step-track" aria-hidden>
-                  <span className={`genai-step-bar kind-${meta.tone}${step.status === "error" ? " error" : ""}`} style={{ left: `${left}%`, width: `${width}%` }} />
-                </div>
-                <div className="genai-step-meta">
-                  <span><Timer size={10} /> {formatDuration(step.durationNano)}</span>
-                  {(step.inputTokens || step.outputTokens) ? (
-                    <span>{(step.inputTokens ?? 0).toLocaleString()} in / {(step.outputTokens ?? 0).toLocaleString()} out</span>
-                  ) : null}
-                  {step.reasoningTokens ? <span>{step.reasoningTokens.toLocaleString()} reasoning</span> : null}
-                  {step.cacheReadInputTokens ? <span>{step.cacheReadInputTokens.toLocaleString()} cache read</span> : null}
-                  {step.cacheCreationInputTokens ? <span>{step.cacheCreationInputTokens.toLocaleString()} cache create</span> : null}
-                  {step.finishReason ? <span>finish {step.finishReason}</span> : null}
-                  {step.providerMetadataPreview ? <span title={step.providerMetadataPreview}>provider metadata</span> : null}
-                  {step.model && step.model !== step.label ? <span>{step.model}</span> : null}
-                  {step.provider ? <span className="muted">{step.provider}</span> : null}
-                </div>
-              </div>
-            </div>
-          );
-        })}
+      <div className="steps-waterfall-overview">
+        <div className="steps-time-axis">
+          {axisLabels.map((label) => (
+            <span key={label}>{label}</span>
+          ))}
+        </div>
+        <div className="steps-overview-track">
+          {visible.map((step, index) => {
+            const meta = stepKindMeta(step.kind);
+            const left = ((step.startMs - min) / span) * 100;
+            const width = Math.max(0.6, (step.durationMs / span) * 100);
+            return (
+              <span
+                key={`overview-${step.spanId}-${index}`}
+                className={`steps-overview-bar kind-${meta.tone}${step.status === "error" ? " error" : ""}`}
+                style={{ left: `${left}%`, width: `${width}%` }}
+                title={step.label || step.kind}
+              />
+            );
+          })}
+        </div>
+      </div>
+      <div className="steps-table">
+        <div className="steps-table-header">
+          <span className="step-col-index">#</span>
+          <span className="step-col-label">Step</span>
+          <span className="step-col-kind">Kind</span>
+          <span className="step-col-duration">Duration</span>
+          <span className="step-col-detail">Detail</span>
+          <span className="step-col-timeline">Timeline</span>
+        </div>
+        <div className="steps-table-body">
+          {visible.map((step, index) => {
+            const meta = stepKindMeta(step.kind);
+            const isRequest = requestSpanIds.has(step.spanId);
+            return (
+              <StepNetworkRow
+                key={`${step.spanId}-${index}`}
+                step={step}
+                index={index}
+                min={min}
+                span={span}
+                meta={meta}
+                isRequest={isRequest}
+                {...(onInspectRequest ? { onInspectRequest } : {})}
+              />
+            );
+          })}
+        </div>
       </div>
     </div>
   );
@@ -2512,12 +2826,90 @@ function stepKindMeta(kind: string): { icon: typeof Bot; tone: string } {
 }
 
 type GenAiRequest = TraceDetail["genAi"]["requests"][number];
-type GenAiRequestTab = "overview" | "flow" | "messages" | "tools" | "response" | "wire";
+type GenAiRequestTab = "flow" | "messages" | "tools" | "response" | "wire";
+
+function formatRequestOverviewMeta(request: GenAiRequest): string {
+  const tokens = request.totalTokens ?? sumTokenPair(request.inputTokens, request.outputTokens);
+  const parts = [
+    formatDuration(request.durationNano),
+    tokens !== undefined ? `${tokens.toLocaleString()} tok (${(request.inputTokens ?? 0).toLocaleString()} in / ${(request.outputTokens ?? 0).toLocaleString()} out)` : undefined,
+    request.cacheReadInputTokens !== undefined ? `${request.cacheReadInputTokens.toLocaleString()} cache read` : undefined,
+    request.reasoningTokens !== undefined ? `${request.reasoningTokens.toLocaleString()} reasoning` : undefined,
+    request.finishReason ? `finish ${request.finishReason}` : undefined,
+    `${request.offeredTools.length} tools offered`
+  ].filter(Boolean);
+  return parts.join(" · ");
+}
+
+function humanizeSpanName(name: string): string {
+  const tail = name.split(".").pop() ?? name;
+  return tail.replace(/[_-]+/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function resolveRequestParentSpan(request: GenAiRequest, spans: TraceDetail["spans"]): TraceDetail["spans"][number] | undefined {
+  const primary = spans.find((span) => span.spanId === request.primarySpanId);
+  if (!primary?.parentSpanId) return undefined;
+  return spans.find((span) => span.spanId === primary.parentSpanId);
+}
+
+function requestContextLabel(request: GenAiRequest, parentSpan?: TraceDetail["spans"][number]): string {
+  const parentName = parentSpan?.name;
+  if (parentName && !/^(chat|completion|generate|llm|ai\.)/i.test(parentName)) {
+    return humanizeSpanName(parentName);
+  }
+  if (request.operation && request.operation !== request.model) {
+    return request.operation.replace(/^ai\./, "");
+  }
+  const finish = (request.finishReason ?? "").toLowerCase();
+  if (finish === "stop" || finish === "end_turn") return "Final reply";
+  if (finish.includes("tool")) return "Tool round";
+  return request.model ?? request.label;
+}
+
+function requestListPreview(request: GenAiRequest): string | undefined {
+  const toolCalls = request.messages.filter((turn) => turn.kind === "tool-call");
+  const toolNames = [...new Set(toolCalls.map((turn) => turn.name).filter((name): name is string => Boolean(name)))];
+  if (toolNames.length > 0) {
+    const label = toolNames.length <= 2
+      ? toolNames.join(", ")
+      : `${toolNames.slice(0, 2).join(", ")} +${toolNames.length - 2}`;
+    return `→ ${label}`;
+  }
+
+  const assistantMessage = [...request.messages].reverse().find(
+    (turn) => turn.role === "assistant" && turn.kind === "message" && (turn.contentPreview || turn.reasoningPreview)
+  );
+  if (assistantMessage) {
+    return truncateText(assistantMessage.contentPreview || assistantMessage.reasoningPreview || "", 72);
+  }
+
+  const lastUser = [...request.messages].reverse().find((turn) => turn.role === "user" && turn.contentPreview);
+  if (lastUser?.contentPreview) {
+    return truncateText(lastUser.contentPreview, 72);
+  }
+
+  return undefined;
+}
+
+function requestListMeta(request: GenAiRequest): string[] {
+  const parts: string[] = [formatDuration(request.durationNano)];
+  if (request.inputTokens !== undefined || request.outputTokens !== undefined) {
+    parts.push(`${(request.inputTokens ?? 0).toLocaleString()}/${(request.outputTokens ?? 0).toLocaleString()}`);
+  } else {
+    const total = request.totalTokens ?? sumTokenPair(request.inputTokens, request.outputTokens);
+    if (total !== undefined) parts.push(`${total.toLocaleString()} tok`);
+  }
+  if (request.messages.length > 0) parts.push(`${request.messages.length} msgs`);
+  const callCount = request.messages.filter((turn) => turn.kind === "tool-call").length;
+  if (callCount > 0) parts.push(`${callCount} call${callCount === 1 ? "" : "s"}`);
+  if (request.finishReason) parts.push(request.finishReason);
+  return parts;
+}
 
 function GenAiRequestsPanel({ trace, focusSpanId }: { trace: TraceDetail; focusSpanId?: string | undefined }) {
   const requests = trace.genAi.requests;
   const [selectedId, setSelectedId] = useState(requests[0]?.id ?? "");
-  const [tab, setTab] = useState<GenAiRequestTab>("overview");
+  const [tab, setTab] = useState<GenAiRequestTab>("flow");
 
   useEffect(() => {
     if (!focusSpanId) return;
@@ -2535,39 +2927,50 @@ function GenAiRequestsPanel({ trace, focusSpanId }: { trace: TraceDetail; focusS
   return (
     <div className="request-inspector">
       <div className="request-list" aria-label="LLM requests">
-        {requests.map((request, index) => (
+        {requests.map((request, index) => {
+          const parentSpan = resolveRequestParentSpan(request, trace.spans);
+          const contextLabel = requestContextLabel(request, parentSpan);
+          const preview = requestListPreview(request);
+          const meta = requestListMeta(request);
+          return (
           <button
             key={request.id}
             type="button"
             className={request.id === selected.id ? "request-list-row active" : "request-list-row"}
             onClick={() => setSelectedId(request.id)}
+            title={[contextLabel, preview, meta.join(" · ")].filter(Boolean).join("\n")}
           >
             <span className="request-list-head">
-              <strong>#{index + 1} {request.label}</strong>
+              <strong>#{index + 1} {contextLabel}</strong>
               {request.status === "error" ? <AlertTriangle size={11} className="span-error-icon" /> : null}
             </span>
+            {request.model && request.model !== contextLabel ? (
+              <span className="request-list-model muted">{request.model}</span>
+            ) : null}
+            {preview ? <span className="request-list-preview">{preview}</span> : null}
             <span className="request-list-meta">
-              <span>{formatDuration(request.durationNano)}</span>
-              <span>{formatOptionalCount(request.totalTokens ?? sumTokenPair(request.inputTokens, request.outputTokens))} tok</span>
-              {request.finishReason ? <span>{request.finishReason}</span> : null}
+              {meta.map((part) => <span key={part}>{part}</span>)}
             </span>
           </button>
-        ))}
+          );
+        })}
       </div>
       <div className="request-detail">
         <header className="request-detail-header">
-          <div>
-            <strong>{selected.label}</strong>
-            <div className="request-detail-sub">
-              {selected.model ? <code className="genai-model-badge">{selected.model}</code> : null}
-              {selected.provider ? <span>{selected.provider}</span> : null}
-              <CopyableCode value={selected.primarySpanId} display={shortId(selected.primarySpanId)} copyLabel="Copy primary span ID" />
+          <div className="request-detail-top">
+            <div>
+              <strong>{selected.label}</strong>
+              <div className="request-detail-sub">
+                {selected.model ? <code className="genai-model-badge">{selected.model}</code> : null}
+                {selected.provider ? <span>{selected.provider}</span> : null}
+                <CopyableCode value={selected.primarySpanId} display={shortId(selected.primarySpanId)} copyLabel="Copy primary span ID" />
+              </div>
             </div>
+            <span className={selected.status === "error" ? "request-status error" : "request-status"}>{selected.status}</span>
           </div>
-          <span className={selected.status === "error" ? "request-status error" : "request-status"}>{selected.status}</span>
+          <p className="request-overview-inline muted">{formatRequestOverviewMeta(selected)}</p>
         </header>
         <div className="tab-strip request-tab-strip">
-          <TabButton active={tab === "overview"} onClick={() => setTab("overview")} label="Overview" count={selected.relatedSpanIds.length} />
           <TabButton active={tab === "flow"} onClick={() => setTab("flow")} label="Flow" count={selected.messages.length} />
           <TabButton active={tab === "messages"} onClick={() => setTab("messages")} label="Messages" count={selected.messages.length} />
           <TabButton active={tab === "tools"} onClick={() => setTab("tools")} label="Offered" count={selected.offeredTools.length} />
@@ -2575,12 +2978,10 @@ function GenAiRequestsPanel({ trace, focusSpanId }: { trace: TraceDetail; focusS
           <TabButton active={tab === "wire"} onClick={() => setTab("wire")} label="Wire" count={primarySpan ? Object.keys(primarySpan.attributes).length : 0} />
         </div>
         <div className="request-tab-content">
-          {tab === "overview" ? (
-            <RequestOverview request={selected} />
-          ) : tab === "flow" ? (
+          {tab === "flow" ? (
             <RequestFlow request={selected} />
           ) : tab === "messages" ? (
-            selected.messages.length === 0 ? <InlineEmpty icon={MessageSquareCode} message="No request message payload was captured." /> : <MessagesView turns={selected.messages} />
+            selected.messages.length === 0 ? <InlineEmpty icon={MessageSquareCode} message="No request message payload was captured." /> : <MessagesView turns={selected.messages} compact />
           ) : tab === "tools" ? (
             <RequestTools tools={selected.offeredTools} />
           ) : tab === "response" ? (
@@ -2598,43 +2999,11 @@ function sumTokenPair(input: number | undefined, output: number | undefined): nu
   return input === undefined && output === undefined ? undefined : (input ?? 0) + (output ?? 0);
 }
 
-function RequestOverview({ request }: { request: GenAiRequest }) {
-  return (
-    <div className="request-overview">
-      <KpiCell label="Duration" primary={formatDuration(request.durationNano)} />
-      <KpiCell label="Tokens" primary={formatOptionalCount(request.totalTokens ?? sumTokenPair(request.inputTokens, request.outputTokens))} secondary={`${request.inputTokens ?? 0} in · ${request.outputTokens ?? 0} out`} />
-      <KpiCell label="Cache read" primary={formatOptionalCount(request.cacheReadInputTokens)} />
-      <KpiCell label="Reasoning" primary={formatOptionalCount(request.reasoningTokens)} />
-      <KpiCell label="Finish" primary={request.finishReason ?? "—"} />
-      <KpiCell label="Tools offered" primary={request.offeredTools.length.toLocaleString()} />
-    </div>
-  );
-}
-
 function RequestFlow({ request }: { request: GenAiRequest }) {
   if (request.messages.length === 0) {
     return <InlineEmpty icon={GitBranch} message="No request flow content was captured." />;
   }
-  return (
-    <div className="request-flow">
-      {request.messages.map((turn, index) => {
-        const meta = messageRoleMeta(turn);
-        return (
-          <div className={`request-flow-row tone-${meta.tone}`} key={`${turn.spanId}-${turn.kind}-${index}`}>
-            <span className="request-flow-index">{index + 1}</span>
-            <span className="request-flow-icon"><meta.icon size={13} /></span>
-            <div className="request-flow-body">
-              <div className="request-flow-title">
-                <strong>{meta.label}</strong>
-                {turn.name ? <code>{turn.name}</code> : null}
-              </div>
-              <p>{turn.contentPreview || turn.reasoningPreview || "No content captured."}</p>
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
+  return <FlowMessageList turns={request.messages} />;
 }
 
 function RequestTools({ tools }: { tools: GenAiRequest["offeredTools"] }) {

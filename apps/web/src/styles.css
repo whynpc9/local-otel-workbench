@@ -3130,51 +3130,52 @@ h1, h2, h3, h4 {
   background: var(--color-border-soft);
 }
 
-.genai-mini-stats {
+/* Trace statistics — a single aligned KPI grid (4 columns × 2 rows) with
+   hairline separators. Replaces the old variable-width inline chips that
+   wrapped into two ragged, misaligned rows. The 1px gap over a border-tinted
+   background renders as crisp dividers between cells. */
+.genai-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-border);
+  overflow: hidden;
+}
+
+.genai-stat-cell {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
+  flex-direction: column;
+  gap: 1px;
+  padding: 6px 10px;
   min-width: 0;
-}
-
-.genai-mini-stats-row {
-  width: 100%;
-}
-
-.genai-mini-stat {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 5px;
-  padding: 3px 8px;
-  border-radius: 6px;
-  border: 1px solid var(--color-border-soft);
   background: var(--color-panel-alt);
-  font-size: 11px;
-  white-space: nowrap;
 }
 
-.genai-mini-stat-label {
-  font-size: 10px;
+.genai-stat-cell-label {
+  font-size: 9.5px;
   font-weight: 600;
-  letter-spacing: 0.03em;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--color-text-muted);
 }
 
-.genai-mini-stat-value {
-  font-size: 12px;
+.genai-stat-cell-value {
+  font-size: 13px;
   font-weight: 600;
   color: var(--color-text);
   font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.genai-mini-stat.tone-warn {
+.genai-stat-cell.tone-warn {
   background: var(--color-warn-soft);
-  border-color: var(--color-warn-soft);
 }
 
-.genai-mini-stat.tone-warn .genai-mini-stat-value {
+.genai-stat-cell.tone-warn .genai-stat-cell-value {
   color: var(--color-warn);
 }
 
@@ -4848,6 +4849,10 @@ h1, h2, h3, h4 {
 @container workspace (max-width: 520px) {
   .genai-kpi-bar {
     grid-template-columns: 1fr;
+  }
+
+  .genai-stat-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .toolbar-live {
