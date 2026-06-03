@@ -49,7 +49,7 @@ otel-workbench otel logs --service my-service --limit 50 --format Json
 - Run a local OTLP/gRPC receiver on `4317`.
 - View traces, spans, logs, metrics, and service resources in a local dashboard.
 - Query telemetry from the CLI for scripts, tests, and coding agents.
-- Inspect GenAI spans, token usage, tool calls, RAG retrievals, and agent timelines.
+- Inspect GenAI spans, token usage, model requests, tool calls, RAG retrievals, and agent timelines.
 - Use memory storage for disposable sessions or SQLite for local persistence.
 - Run MCP stdio or Streamable HTTP servers for agent integrations.
 
@@ -86,6 +86,34 @@ POST /v1/traces
 POST /v1/logs
 POST /v1/metrics
 ```
+
+## GenAI and Agent Debugging
+
+The GenAI page recognizes OpenTelemetry GenAI semantic conventions, OpenInference-style span kinds, and Vercel AI SDK `ai.*` telemetry fields. It turns raw spans into an agent-oriented view:
+
+- `Messages`: reconstructed system, user, assistant, tool-call, and tool-result turns.
+- `Steps`: LLM, agent, tool, retrieval, embedding, and rerank spans on one timeline.
+- `Requests`: one row per canonical model call with Flow, Messages, Offered tools, Response, and Wire tabs.
+- `Tools`: grouped tool calls with argument/result previews and failures.
+- `RAG`: retrieval counts and retrieved document previews.
+
+For Vercel AI SDK calls, enable telemetry per call:
+
+```ts
+await generateText({
+  model,
+  prompt,
+  experimental_telemetry: {
+    isEnabled: true,
+    recordInputs: true,
+    recordOutputs: true,
+    functionId: "local-debug",
+    metadata: { framework: "ai-sdk" }
+  }
+});
+```
+
+The workbench maps AI SDK fields such as `ai.prompt.messages`, `ai.prompt.tools`, `ai.response.text`, `ai.response.toolCalls`, `ai.usage.*`, `ai.response.finishReason`, and `ai.response.providerMetadata` into the GenAI view. See [`docs/genai-framework-support.md`](docs/genai-framework-support.md) for the framework matrix and validation probes.
 
 ## CLI
 
@@ -187,6 +215,8 @@ POST /api/retention
 
 List APIs accept `limit`, `cursor`, `from`, and `to` where relevant. Trace and span lists support `service`, `q`, `hasError`, and `minDurationMs`; span lists also support `traceId`.
 
+`GET /api/genai/traces/:traceId` returns the normalized GenAI model used by the dashboard: `spans`, `timeline`, `requests`, `conversation`, `rag`, token/cache/reasoning summaries, finish reasons, provider metadata count, estimated cost, and tool-call counts.
+
 ## MCP
 
 Run the stdio MCP server:
@@ -215,6 +245,8 @@ get_genai_conversation
 summarize_trace
 find_slow_operations
 ```
+
+`get_genai_conversation` returns the same normalized GenAI trace view as the dashboard API, so coding agents can inspect request messages, offered tools, RAG documents, token usage, and tool results without scraping the UI.
 
 ## Agent Skill
 
@@ -246,8 +278,11 @@ pnpm dev
 Prepare for npm publishing without publishing:
 
 ```bash
+pnpm release:dry-run
 pnpm publish:preflight
 ```
+
+`publish:preflight` checks the target npm version, runs the release dry-run, and performs an npm publish dry-run. Log in with `npm login` before the real publish.
 
 Publish the single public package:
 
@@ -274,4 +309,5 @@ Local OTel Workbench is inspired by the standalone [Aspire Dashboard](https://as
 - [OpenTelemetry semantic conventions](https://opentelemetry.io/docs/specs/semconv/)
 - [OpenTelemetry GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
 - [OpenTelemetry GenAI spans](https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-spans/)
+- [AI SDK telemetry](https://ai-sdk.dev/docs/ai-sdk-core/telemetry)
 - [Aspire standalone dashboard](https://aspire.dev/dashboard/standalone/)

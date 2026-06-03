@@ -80,7 +80,7 @@ export async function runMcpHttpServer(options: McpHttpServerOptions) {
 function createWorkbenchMcpServer(baseUrl: string) {
   const server = new McpServer({
     name: "local-otel-workbench",
-    version: "0.1.0"
+    version: "0.2.0"
   });
   registerWorkbenchTools(server, baseUrl);
   return server;
